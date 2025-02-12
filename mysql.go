@@ -50,7 +50,6 @@ func (m *mySQLParser) handleSelectStmt(stmt *sqlparser.Select) (string, error) {
 		result  string
 		uPaging *uPaging = m.uTabling.uPaging
 		vSorts  *vSorts  = m.vTabling.vSorts
-		// tableName string   = strings.ReplaceAll(strings.Split(sqlparser.String(stmt.GetFrom()[0]), " ")[0], "`", "") // get main table name
 	)
 
 	if uPaging != nil {
@@ -60,7 +59,6 @@ func (m *mySQLParser) handleSelectStmt(stmt *sqlparser.Select) (string, error) {
 		}
 	} else if vSorts != nil {
 		m.setSorts()
-
 	}
 
 	buf := sqlparser.NewTrackedBuffer(nil)
@@ -102,19 +100,31 @@ func (m *mySQLParser) cursorSetWhere() (err error) {
 
 	for i, vSort := range *vSorts {
 
-		comparisonOp, _ := getOperator(string(vCursor.Prefix), vSort.prefix)
+		comparisonOp := getOperator(string(vCursor.Prefix), vSort.prefix)
 
 		expr := &sqlparser.ComparisonExpr{
 			Operator: comparisonOp,
 		}
-		// sqlparser.ParenTableExpr
+
+		columns := strings.Split(vSort.column, ".")
+		var columnQualifier string
+		var columnName string
+		if len(columns) == 2 {
+			columnQualifier = columns[0]
+			columnName = columns[1]
+		} else if len(columns) == 1 {
+			columnName = columns[0]
+		} else {
+			return fmt.Errorf("invalid column name: %s", vSort.column)
+		}
 
 		if vSort.nullable {
 			expr.Left = &sqlparser.FuncExpr{
 				Name: sqlparser.NewIdentifierCI("COALESCE"),
 				Exprs: sqlparser.Exprs{
 					&sqlparser.ColName{
-						Name: sqlparser.NewIdentifierCI(vSort.column),
+						Name:      sqlparser.NewIdentifierCI(columnName),
+						Qualifier: sqlparser.NewTableName(columnQualifier),
 					},
 					sqlparser.NewStrLiteral(""),
 				},
@@ -128,7 +138,7 @@ func (m *mySQLParser) cursorSetWhere() (err error) {
 				},
 			}
 		} else {
-			expr.Left = sqlparser.NewColName(vSort.column)
+			expr.Left = sqlparser.NewColNameWithQualifier(columnName, sqlparser.NewTableName(columnQualifier))
 			expr.Right = sqlparser.NewStrLiteral(vCursor.Cols[vSort.column])
 		}
 
@@ -178,14 +188,12 @@ func createMultipleOrExpr(exprs ...sqlparser.Expr) sqlparser.Expr {
 }
 
 // getOperator gets the operator for the cursor pagination.
-func getOperator(prefix string, orderType string) (sqlparser.ComparisonExprOperator, sqlparser.OrderDirection) {
+func getOperator(prefix string, orderType string) sqlparser.ComparisonExprOperator {
 
 	var (
-		next           = prefix == "next"
-		prev           = !next
-		operator       sqlparser.ComparisonExprOperator
-		orderDirection sqlparser.OrderDirection
-		// changeDirection bool
+		next     = prefix == "next"
+		prev     = !next
+		operator sqlparser.ComparisonExprOperator
 	)
 
 	if next && orderType == "-" {
@@ -194,14 +202,10 @@ func getOperator(prefix string, orderType string) (sqlparser.ComparisonExprOpera
 		operator = sqlparser.GreaterThanOp
 	} else if prev && orderType == "-" {
 		operator = sqlparser.GreaterThanOp
-		orderDirection = sqlparser.AscOrder
-		// changeDirection = true
 	} else if prev && orderType == "+" {
 		operator = sqlparser.LessThanOp
-		orderDirection = sqlparser.DescOrder
-		// changeDirection = true
 	}
-	return operator, orderDirection
+	return operator
 }
 
 // getSlectColumns returns the select columns from the statement.
@@ -263,18 +267,12 @@ func (m *mySQLParser) cursorSetLimitAndSort() {
 	)
 
 	if m.vTabling.vCursor != nil {
-		if m.vTabling.vCursor.isPrev() {
-			// changeOrderDirection = true
+		if m.vTabling.vCursor.Prefix.isPrev() {
 			vSorts = m.vTabling.vSorts.reverseDirection()
 		}
 	}
 
-	vSorts = append(vSorts, vSort{column: m.uTabling.uPaging.ColumnID, direction: sqlparser.AscOrder})
-
-	// vSorts := parseSort(sorts)
-	// if changeOrderDirection {
-	// 	vSorts = vSorts.reverseDirection()
-	// }
+	// vSorts = append(vSorts, vSort{column: m.uTabling.uPaging.ColumnID, direction: sqlparser.AscOrder})
 
 	// set limit to limit + 1
 	m.stmt.SetLimit(&sqlparser.Limit{
@@ -331,28 +329,4 @@ func (m *mySQLParser) setSorts() {
 
 	m.applySorts(vSorts)
 
-	// parse sort string to get the sort by and sort type
-	// vSorts := parseSort(m.tabling.Sorting.Sort)
-
-	// for _, vSort := range *vSorts {
-	// 	// sort by column contains table name
-	// 	sortBySplit := strings.Split(vSort.column, ".")
-	// 	if len(sortBySplit) == 2 {
-	// 		// add order to the statement
-	// 		m.stmt.AddOrder(&sqlparser.Order{
-	// 			Expr: &sqlparser.ColName{
-	// 				Name:      sqlparser.NewIdentifierCI(sortBySplit[1]),
-	// 				Qualifier: sqlparser.NewTableName(sortBySplit[0]),
-	// 			},
-	// 			Direction: vSort.direction,
-	// 		})
-
-	// 	} else {
-	// 		// add order to the statement
-	// 		m.stmt.AddOrder(&sqlparser.Order{
-	// 			Expr:      &sqlparser.ColName{Name: sqlparser.NewIdentifierCI(vSort.column)},
-	// 			Direction: vSort.direction,
-	// 		})
-	// 	}
-	// }
 }

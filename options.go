@@ -1,14 +1,10 @@
 package kuysor
 
 type Options struct {
-	Dialect Dialect
+	Dialect      Dialect
+	DefaultLimit int
+	StructTag    string
 }
-
-type Dialect string
-
-const (
-	MySQL Dialect = "mysql"
-)
 
 var (
 	options *Options

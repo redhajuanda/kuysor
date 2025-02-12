@@ -6,6 +6,10 @@ import (
 	"github.com/redhajuanda/sqlparser"
 )
 
+type uSort struct {
+	Sorts []string
+}
+
 type vSort struct {
 	prefix    string
 	column    string
@@ -13,17 +17,17 @@ type vSort struct {
 	direction sqlparser.OrderDirection
 }
 
-func (s *vSort) isNullable() bool {
-	return s.nullable
-}
+// func (s *vSort) isNullable() bool {
+// 	return s.nullable
+// }
 
-func (s *vSort) desc() bool {
-	return s.prefix == "-"
-}
+// func (s *vSort) desc() bool {
+// 	return s.prefix == "-"
+// }
 
-func (s *vSort) asc() bool {
-	return s.prefix == "+"
-}
+// func (s *vSort) asc() bool {
+// 	return s.prefix == "+"
+// }
 
 type vSorts []vSort
 

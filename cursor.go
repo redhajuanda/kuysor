@@ -1,79 +1,26 @@
 package kuysor
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 )
 
-type CursorPrefix string
-
-const (
-	CursorPrefixNext CursorPrefix = "next"
-	CursorPrefixPrev CursorPrefix = "prev"
-)
-
+// vCursor is the cursor struct for internal use.
 type vCursor struct {
-	Prefix CursorPrefix      `json:"prefix"`
+	Prefix cursorPrefix      `json:"prefix"`
 	Cols   map[string]string `json:"cols"`
-	Id     map[string]string `json:"id"`
-	cursor string            `json:"-"`
+	cursor cursorBase64      `json:"-"`
 }
 
-func (v *vCursor) isNext() bool {
-	return v.Prefix == CursorPrefixNext
-}
+// generateCursorBase64 generates the cursor base64 from vCursor.
+func (v *vCursor) generateCursorBase64() (cursorBase64, error) {
 
-func (v *vCursor) isPrev() bool {
-	return v.Prefix == CursorPrefixPrev
-}
-
-// parseCursor parses the cursor.
-func parseCursor(cursor string) (*vCursor, error) {
-
-	var (
-		vcursor vCursor
-	)
-
-	// decode cursor from base64
-	decodedCursor, err := decodeCursor(cursor)
-	if err != nil {
-		return nil, err
-	}
-
-	// unmarshal cursor
-	err = json.Unmarshal([]byte(decodedCursor), &vcursor)
-	if err != nil {
-		return nil, fmt.Errorf("failed to unmarshal cursor: %v", err)
-	}
-
-	vcursor.cursor = cursor
-
-	return &vcursor, nil
-}
-
-// generateCursor generates the cursor.
-func generateCursor(vCursor vCursor) (string, error) {
-
-	item, err := json.Marshal(vCursor)
+	item, err := json.Marshal(v)
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal cursor: %v", err)
 	}
 
-	return encodeCursor(string(item)), nil
+	v.cursor = cursorBase64(base64Encode(string(item)))
+	return v.cursor, nil
 
-}
-
-// encodeCursor encodes the cursor.
-func encodeCursor(cursor string) string {
-	return base64.StdEncoding.EncodeToString([]byte(cursor))
-}
-
-// decodeCursor decodes the cursor.
-func decodeCursor(cursor string) (string, error) {
-	decoded, err := base64.StdEncoding.DecodeString(cursor)
-	if err != nil {
-		return "", err
-	}
-	return string(decoded), nil
 }
