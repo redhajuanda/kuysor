@@ -17,9 +17,9 @@ type vSort struct {
 	direction sqlparser.OrderDirection
 }
 
-// func (s *vSort) isNullable() bool {
-// 	return s.nullable
-// }
+func (s *vSort) isNullable() bool {
+	return s.nullable
+}
 
 // func (s *vSort) desc() bool {
 // 	return s.prefix == "-"
@@ -47,6 +47,7 @@ func (s vSorts) reverseDirection() vSorts {
 	return vSorts
 }
 
+// parseSort parses the sort string and returns the vSorts.
 func parseSort(sorts []string) *vSorts {
 
 	var sSorts = make(vSorts, 0)
@@ -56,6 +57,7 @@ func parseSort(sorts []string) *vSorts {
 
 		if strings.HasSuffix(strings.ToLower(s), "nullable") {
 			nullable = true
+			s = strings.TrimSuffix(s, " nullable")
 		}
 		if strings.HasPrefix(s, "-") {
 			sSorts = append(sSorts, vSort{column: strings.TrimPrefix(s, "-"), prefix: "-", direction: sqlparser.DescOrder, nullable: nullable})

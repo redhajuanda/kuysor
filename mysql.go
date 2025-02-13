@@ -58,7 +58,10 @@ func (m *mySQLParser) handleSelectStmt(stmt *sqlparser.Select) (string, error) {
 			return result, err
 		}
 	} else if vSorts != nil {
-		m.setSorts()
+		err := m.setSorts()
+		if err != nil {
+			return result, err
+		}
 	}
 
 	buf := sqlparser.NewTrackedBuffer(nil)
@@ -82,8 +85,7 @@ func (m *mySQLParser) handlePaging() (err error) {
 	}
 
 	// set limit and sort
-	m.cursorSetLimitAndSort()
-	return
+	return m.cursorSetLimitAndSort()
 
 }
 
@@ -93,19 +95,36 @@ func (m *mySQLParser) cursorSetWhere() (err error) {
 		vCursor = m.vTabling.vCursor
 	)
 
-	exprs := make([]*sqlparser.ComparisonExpr, 0)
+	exprs := make([]sqlparser.Expr, 0)
 	gr := make([]sqlparser.Expr, 0)
 
-	// var conditions []sqlparser.OrExpr
+	for _, vSort := range *vSorts {
 
-	for i, vSort := range *vSorts {
+		fmt.Println("==> order:", vSort.column, len(exprs))
 
-		comparisonOp := getOperator(string(vCursor.Prefix), vSort.prefix)
+		exs := make([]sqlparser.Expr, 0)
+		cutOff := 0
 
-		expr := &sqlparser.ComparisonExpr{
-			Operator: comparisonOp,
+		for _, cp := range exprs {
+			e := cp
+			if v, ok := e.(*sqlparser.ComparisonExpr); ok {
+				vv := *v
+				vv.Operator = sqlparser.EqualOp
+				exs = append(exs, &vv)
+			} else if v, ok := e.(*sqlparser.OrExpr); ok {
+				lft := *(v.Left.(*sqlparser.IsExpr))
+				rgt := *(v.Right.(*sqlparser.ComparisonExpr))
+				rgt.Operator = sqlparser.EqualOp
+				exs = append(exs, &sqlparser.OrExpr{
+					Left:  &lft,
+					Right: &rgt,
+				})
+			}
 		}
 
+		cutOff = len(exs)
+
+		comparisonOp := getOperator(string(vCursor.Prefix), vSort.prefix)
 		columns := strings.Split(vSort.column, ".")
 		var columnQualifier string
 		var columnName string
@@ -119,41 +138,35 @@ func (m *mySQLParser) cursorSetWhere() (err error) {
 		}
 
 		if vSort.nullable {
-			expr.Left = &sqlparser.FuncExpr{
-				Name: sqlparser.NewIdentifierCI("COALESCE"),
-				Exprs: sqlparser.Exprs{
-					&sqlparser.ColName{
-						Name:      sqlparser.NewIdentifierCI(columnName),
-						Qualifier: sqlparser.NewTableName(columnQualifier),
-					},
-					sqlparser.NewStrLiteral(""),
+
+			expr := &sqlparser.OrExpr{
+				Left: &sqlparser.IsExpr{
+					Left:  sqlparser.NewColNameWithQualifier(columnName, sqlparser.NewTableName(columnQualifier)),
+					Right: sqlparser.IsNullOp,
+				},
+				Right: &sqlparser.ComparisonExpr{
+					Left:     sqlparser.NewColNameWithQualifier(columnName, sqlparser.NewTableName(columnQualifier)),
+					Right:    sqlparser.NewStrLiteral(vCursor.Cols[vSort.column]),
+					Operator: comparisonOp,
 				},
 			}
 
-			expr.Right = &sqlparser.FuncExpr{
-				Name: sqlparser.NewIdentifierCI("COALESCE"),
-				Exprs: sqlparser.Exprs{
-					sqlparser.NewStrLiteral(vCursor.Cols[vSort.column]),
-					sqlparser.NewStrLiteral(""),
-				},
-			}
+			exs = append(exs, expr)
+			fmt.Println("append 3")
+
 		} else {
+			expr := &sqlparser.ComparisonExpr{
+				Operator: comparisonOp,
+			}
 			expr.Left = sqlparser.NewColNameWithQualifier(columnName, sqlparser.NewTableName(columnQualifier))
 			expr.Right = sqlparser.NewStrLiteral(vCursor.Cols[vSort.column])
+			exs = append(exs, expr)
+			fmt.Println("append 4")
 		}
 
-		exprs = append(exprs, expr)
+		exprs = append(exprs, exs[cutOff:]...)
 
-		exprSlice := make([]sqlparser.Expr, len(exprs))
-		for j, expr := range exprs {
-			cpExpr := *expr
-			if i != 0 && j != len(exprs)-1 {
-				cpExpr.Operator = sqlparser.EqualOp
-			}
-			exprSlice[j] = &cpExpr // This works because ComparisonExpr implements Expr
-		}
-
-		grExpr := sqlparser.AndExpressions(exprSlice...)
+		grExpr := sqlparser.AndExpressions(exs...)
 		gr = append(gr, grExpr)
 
 	}
@@ -259,7 +272,7 @@ func getOperator(prefix string, orderType string) sqlparser.ComparisonExprOperat
 // }
 
 // cursorSetLimitAndSort sets the limit and sort for the cursor pagination.
-func (m *mySQLParser) cursorSetLimitAndSort() {
+func (m *mySQLParser) cursorSetLimitAndSort() error {
 
 	var (
 		limit  = m.uTabling.uPaging.Limit
@@ -280,43 +293,57 @@ func (m *mySQLParser) cursorSetLimitAndSort() {
 	})
 
 	// set sorting for column
-	m.applySorts(&vSorts)
+	return m.applySorts(&vSorts)
 
 }
 
 // addSorting adds the sorting for the sql query.
-func (m *mySQLParser) applySorts(vSorts *vSorts) {
-
-	// // parse sort string to get the sort by and sort type
-	// vSorts := parseSort(sorting.Sort)
+func (m *mySQLParser) applySorts(vSorts *vSorts) error {
 
 	for _, vSort := range *vSorts {
-		// sort by column contains table name
-		sortsBy := strings.Split(vSort.column, ".")
-		if len(sortsBy) == 2 {
-			// add order to the statement
-			m.stmt.AddOrder(&sqlparser.Order{
-				Expr: &sqlparser.ColName{
-					Name:      sqlparser.NewIdentifierCI(sortsBy[1]),
-					Qualifier: sqlparser.NewTableName(sortsBy[0]),
-				},
-				Direction: vSort.direction,
-			})
 
+		var (
+			sortsBy   = strings.Split(vSort.column, ".")
+			qualifier string
+			column    string
+		)
+
+		if len(sortsBy) == 2 {
+			qualifier = sortsBy[0]
+			column = sortsBy[1]
+		} else if len(sortsBy) == 1 {
+			column = sortsBy[0]
 		} else {
-			// add order to the statement
+			return fmt.Errorf("invalid column name: %s", vSort.column)
+		}
+
+		if vSort.isNullable() {
 			m.stmt.AddOrder(&sqlparser.Order{
-				Expr: &sqlparser.ColName{
-					Name: sqlparser.NewIdentifierCI(vSort.column),
+				Expr: &sqlparser.IsExpr{
+					Left: &sqlparser.ColName{
+						Name:      sqlparser.NewIdentifierCI(column),
+						Qualifier: sqlparser.NewTableName(qualifier),
+					},
+					Right: sqlparser.IsNullOp,
 				},
 				Direction: vSort.direction,
 			})
 		}
+
+		m.stmt.AddOrder(&sqlparser.Order{
+			Expr: &sqlparser.ColName{
+				Name:      sqlparser.NewIdentifierCI(column),
+				Qualifier: sqlparser.NewTableName(qualifier),
+			},
+			Direction: vSort.direction,
+		})
 	}
+
+	return nil
 }
 
 // setSorting sets the sorting for the sql query.
-func (m *mySQLParser) setSorts() {
+func (m *mySQLParser) setSorts() error {
 
 	var (
 		vSorts = m.vTabling.vSorts
@@ -324,9 +351,9 @@ func (m *mySQLParser) setSorts() {
 
 	// return if sorting is nil
 	if vSorts == nil {
-		return
+		return nil
 	}
 
-	m.applySorts(vSorts)
+	return m.applySorts(vSorts)
 
 }
