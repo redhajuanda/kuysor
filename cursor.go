@@ -7,9 +7,9 @@ import (
 
 // vCursor is the cursor struct for internal use.
 type vCursor struct {
-	Prefix cursorPrefix      `json:"prefix"`
-	Cols   map[string]string `json:"cols"`
-	cursor cursorBase64      `json:"-"`
+	Prefix cursorPrefix           `json:"prefix"`
+	Cols   map[string]interface{} `json:"cols"`
+	cursor cursorBase64           `json:"-"`
 }
 
 // generateCursorBase64 generates the cursor base64 from vCursor.

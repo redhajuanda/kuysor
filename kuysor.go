@@ -130,7 +130,8 @@ func (p *Kuysor) build() (string, error) {
 func (p *Kuysor) prepareVTabling() (err error) {
 
 	var (
-		cursorBase64 = cursorBase64(p.uTabling.uPaging.Cursor)
+		cursorBase64    = cursorBase64(p.uTabling.uPaging.Cursor)
+		counterNullable = 0
 	)
 
 	p.vTabling = &vTabling{}
@@ -145,12 +146,22 @@ func (p *Kuysor) prepareVTabling() (err error) {
 
 	// parse sort
 	p.vTabling.vSorts = parseSort(p.uTabling.uSort.Sorts)
+
+	for _, vSort := range *p.vTabling.vSorts {
+		if vSort.isNullable() {
+			counterNullable++
+		}
+	}
+	if counterNullable > 1 {
+		return errors.New("only one nullable sort is allowed")
+	}
 	return
 
 }
 
-// PaginateMap handles the data for the cursor pagination.
-func (p *Kuysor) PaginateMap(data *[]map[string]interface{}) (next string, prev string, err error) {
+// SanitizeMap handles the map data for the cursor pagination.
+// It returns the next and previous cursor.
+func (p *Kuysor) SanitizeMap(data *[]map[string]interface{}) (next string, prev string, err error) {
 
 	if p.uTabling == nil {
 		return next, prev, errors.New("uTabling is nil")
@@ -169,11 +180,11 @@ func (p *Kuysor) PaginateMap(data *[]map[string]interface{}) (next string, prev 
 		isFirstPage      = vcursor == nil
 		cursorPrev       = vCursor{
 			Prefix: cursorPrefixPrev,
-			Cols:   make(map[string]string),
+			Cols:   make(map[string]interface{}),
 		}
 		cursorNext = vCursor{
 			Prefix: cursorPrefixNext,
-			Cols:   make(map[string]string),
+			Cols:   make(map[string]interface{}),
 		}
 	)
 
@@ -208,13 +219,8 @@ func (p *Kuysor) PaginateMap(data *[]map[string]interface{}) (next string, prev 
 
 	for _, vSort := range *vSorts {
 
-		var (
-			firstSort = fmt.Sprintf("%v", (*data)[0][vSort.column])
-			lastSort  = fmt.Sprintf("%v", (*data)[totalDataUpdated-1][vSort.column])
-		)
-
-		cursorPrev.Cols[vSort.column] = firstSort
-		cursorNext.Cols[vSort.column] = lastSort
+		cursorPrev.Cols[vSort.column] = (*data)[0][vSort.column]
+		cursorNext.Cols[vSort.column] = (*data)[totalDataUpdated-1][vSort.column]
 
 	}
 
@@ -223,8 +229,9 @@ func (p *Kuysor) PaginateMap(data *[]map[string]interface{}) (next string, prev 
 
 }
 
-// PaginateStruct handles cursor pagination for slice of structs
-func (p *Kuysor) PaginateStruct(data interface{}) (next string, prev string, err error) {
+// SanitizeStruct handles struct data for the cursor pagination.
+// It returns the next and previous cursor.
+func (p *Kuysor) SanitizeStruct(data interface{}) (next string, prev string, err error) {
 
 	if p.uTabling == nil {
 		return next, prev, errors.New("uTabling is nil")
@@ -250,11 +257,11 @@ func (p *Kuysor) PaginateStruct(data interface{}) (next string, prev string, err
 		isFirstPage      = vcursor == nil
 		cursorPrev       = vCursor{
 			Prefix: cursorPrefixPrev,
-			Cols:   make(map[string]string),
+			Cols:   make(map[string]interface{}),
 		}
 		cursorNext = vCursor{
 			Prefix: cursorPrefixNext,
-			Cols:   make(map[string]string),
+			Cols:   make(map[string]interface{}),
 		}
 	)
 
@@ -294,8 +301,8 @@ func (p *Kuysor) PaginateStruct(data interface{}) (next string, prev string, err
 		firstVal := getFieldValueByTag(firstItem, vSort.column, p.options.StructTag)
 		lastVal := getFieldValueByTag(lastItem, vSort.column, p.options.StructTag)
 
-		cursorPrev.Cols[vSort.column] = fmt.Sprintf("%v", firstVal)
-		cursorNext.Cols[vSort.column] = fmt.Sprintf("%v", lastVal)
+		cursorPrev.Cols[vSort.column] = firstVal
+		cursorNext.Cols[vSort.column] = lastVal
 	}
 
 	// generate cursor

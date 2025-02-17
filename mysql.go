@@ -2,6 +2,7 @@ package kuysor
 
 import (
 	"fmt"
+	"reflect"
 	"strings"
 
 	"errors"
@@ -53,17 +54,18 @@ func (m *mySQLParser) handleSelectStmt(stmt *sqlparser.Select) (string, error) {
 	)
 
 	if uPaging != nil {
-		err := m.handlePaging()
+		err := m.handlePagination()
 		if err != nil {
 			return result, err
 		}
 	} else if vSorts != nil {
-		err := m.setSorts()
+		err := m.applySorts(vSorts)
 		if err != nil {
 			return result, err
 		}
 	}
 
+	// format the statement
 	buf := sqlparser.NewTrackedBuffer(nil)
 	stmt.Format(buf)
 	result = buf.String()
@@ -72,113 +74,217 @@ func (m *mySQLParser) handleSelectStmt(stmt *sqlparser.Select) (string, error) {
 	return replaceBindVariables(result), nil
 }
 
-// handlePaging handles the pagination.
-func (m *mySQLParser) handlePaging() (err error) {
+// handlePagination handles the pagination.
+func (m *mySQLParser) handlePagination() (err error) {
 
 	// if cursor is not empty, it means it is not the first page
 	// so we need to set where clause
 	if m.vTabling.vCursor != nil {
-		err = m.cursorSetWhere()
+		err = m.applyWhere()
 		if err != nil {
 			return err
 		}
 	}
 
-	// set limit and sort
-	return m.cursorSetLimitAndSort()
+	// apply limit and sorts
+	return m.applyLimitAndSorts()
 
 }
 
-func (m *mySQLParser) cursorSetWhere() (err error) {
+// sanitize sanitizes the column name of the order by.
+func (m *mySQLParser) sanitize(vSort *vSort) (qualifier string, column string, err error) {
+
+	columns := strings.Split(vSort.column, ".")
+	if len(columns) == 2 {
+		qualifier = columns[0]
+		column = columns[1]
+	} else if len(columns) == 1 {
+		column = columns[0]
+	} else {
+		return "", "", fmt.Errorf("invalid column name: %s", vSort.column)
+	}
+
+	return
+}
+
+// getCursorValue gets the cursor value.
+func (m *mySQLParser) getCursorValue(vSort *vSort) (col *sqlparser.Literal, err error) {
+
+	var (
+		vCursor = m.vTabling.vCursor
+	)
+
+	if vCursor.Cols[vSort.column] == nil {
+		col = nil
+	} else {
+		to := reflect.TypeOf(vCursor.Cols[vSort.column]).Kind()
+		switch to {
+		case reflect.String:
+			col = sqlparser.NewStrLiteral(vCursor.Cols[vSort.column].(string))
+		case reflect.Int:
+			col = sqlparser.NewIntLiteral(fmt.Sprintf("%v", vCursor.Cols[vSort.column]))
+		case reflect.Float64:
+			col = sqlparser.NewFloatLiteral(fmt.Sprintf("%v", vCursor.Cols[vSort.column]))
+		case reflect.Bool:
+			col = sqlparser.NewIntLiteral(fmt.Sprintf("%v", vCursor.Cols[vSort.column]))
+		default:
+			return nil, fmt.Errorf("invalid column type: %s", to)
+		}
+	}
+
+	return
+}
+
+// applyWhere applies the where clause to the sql query.
+func (m *mySQLParser) applyWhere() (err error) {
+
+	e, err := m.constructExprs()
+	if err != nil {
+		return err
+	}
+
+	m.stmt.AddWhere(e)
+
+	return
+}
+
+// constructExprs constructs the expression for the where clause.
+func (m *mySQLParser) constructExprs() (expr sqlparser.Expr, err error) {
+
+	exprs, err := m.constructExprs2()
+	if err != nil {
+		return nil, err
+	}
+
+	return m.createMultipleOrExpr(exprs...), nil
+
+}
+
+func (m *mySQLParser) constructExprs2() (expr []sqlparser.Expr, err error) {
+
 	var (
 		vSorts  = m.vTabling.vSorts
 		vCursor = m.vTabling.vCursor
 	)
 
 	exprs := make([]sqlparser.Expr, 0)
-	gr := make([]sqlparser.Expr, 0)
 
-	for _, vSort := range *vSorts {
+	for i, vSort := range *vSorts {
 
-		fmt.Println("==> order:", vSort.column, len(exprs))
+		operator := m.getOperator(string(m.vTabling.vCursor.Prefix), vSort.prefix)
 
-		exs := make([]sqlparser.Expr, 0)
-		cutOff := 0
+		col, err := m.getCursorValue(&vSort)
+		if err != nil {
+			return nil, err
+		}
 
-		for _, cp := range exprs {
-			e := cp
-			if v, ok := e.(*sqlparser.ComparisonExpr); ok {
-				vv := *v
-				vv.Operator = sqlparser.EqualOp
-				exs = append(exs, &vv)
-			} else if v, ok := e.(*sqlparser.OrExpr); ok {
-				lft := *(v.Left.(*sqlparser.IsExpr))
-				rgt := *(v.Right.(*sqlparser.ComparisonExpr))
-				rgt.Operator = sqlparser.EqualOp
-				exs = append(exs, &sqlparser.OrExpr{
-					Left:  &lft,
-					Right: &rgt,
-				})
+		expr := make([]sqlparser.Expr, 0)
+
+		if col != nil && vCursor.Prefix.isNext() && vSort.nullable && vSort.prefix == "+" ||
+			col != nil && vCursor.Prefix.isPrev() && vSort.nullable && vSort.prefix == "-" {
+			e, err := m.constructIsExpr(&vSort, sqlparser.IsNullOp)
+			if err != nil {
+				return nil, err
+			}
+			exprs = append(exprs, e)
+		}
+
+		if col == nil && vCursor.Prefix.isPrev() && vSort.nullable && vSort.prefix == "+" ||
+			col == nil && vCursor.Prefix.isNext() && vSort.nullable && vSort.prefix == "-" {
+			e, err := m.constructIsExpr(&vSort, sqlparser.IsNotNullOp)
+			if err != nil {
+				return nil, err
+			}
+			exprs = append(exprs, e)
+		}
+
+		for j, vSort2 := range *vSorts {
+
+			if j > i {
+				continue
+			}
+			// skip single comparator
+			if j == 0 && vSort.nullable && col == nil {
+				continue
+			}
+
+			if j < i {
+
+				col2, err := m.getCursorValue(&vSort2)
+				if err != nil {
+					return nil, err
+				}
+
+				if col2 == nil {
+					e, err := m.constructIsExpr(&vSort2, sqlparser.IsNullOp)
+					if err != nil {
+						return nil, err
+					}
+					expr = append(expr, e)
+				} else {
+					e, err := m.constructCompExpr(&vSort2, sqlparser.EqualOp)
+					if err != nil {
+						return nil, err
+					}
+					expr = append(expr, e)
+				}
+
+			} else {
+				e, err := m.constructCompExpr(&vSort2, operator)
+				if err != nil {
+					return nil, err
+				}
+				expr = append(expr, e)
 			}
 		}
 
-		cutOff = len(exs)
-
-		comparisonOp := getOperator(string(vCursor.Prefix), vSort.prefix)
-		columns := strings.Split(vSort.column, ".")
-		var columnQualifier string
-		var columnName string
-		if len(columns) == 2 {
-			columnQualifier = columns[0]
-			columnName = columns[1]
-		} else if len(columns) == 1 {
-			columnName = columns[0]
-		} else {
-			return fmt.Errorf("invalid column name: %s", vSort.column)
+		if len(expr) > 0 {
+			andExprs := sqlparser.AndExpressions(expr...)
+			exprs = append(exprs, andExprs)
 		}
-
-		if vSort.nullable {
-
-			expr := &sqlparser.OrExpr{
-				Left: &sqlparser.IsExpr{
-					Left:  sqlparser.NewColNameWithQualifier(columnName, sqlparser.NewTableName(columnQualifier)),
-					Right: sqlparser.IsNullOp,
-				},
-				Right: &sqlparser.ComparisonExpr{
-					Left:     sqlparser.NewColNameWithQualifier(columnName, sqlparser.NewTableName(columnQualifier)),
-					Right:    sqlparser.NewStrLiteral(vCursor.Cols[vSort.column]),
-					Operator: comparisonOp,
-				},
-			}
-
-			exs = append(exs, expr)
-			fmt.Println("append 3")
-
-		} else {
-			expr := &sqlparser.ComparisonExpr{
-				Operator: comparisonOp,
-			}
-			expr.Left = sqlparser.NewColNameWithQualifier(columnName, sqlparser.NewTableName(columnQualifier))
-			expr.Right = sqlparser.NewStrLiteral(vCursor.Cols[vSort.column])
-			exs = append(exs, expr)
-			fmt.Println("append 4")
-		}
-
-		exprs = append(exprs, exs[cutOff:]...)
-
-		grExpr := sqlparser.AndExpressions(exs...)
-		gr = append(gr, grExpr)
-
 	}
 
-	orExpr := createMultipleOrExpr(gr...)
-
-	m.stmt.AddWhere(orExpr)
-
-	return nil
+	return exprs, nil
 }
 
-func createMultipleOrExpr(exprs ...sqlparser.Expr) sqlparser.Expr {
+// constructExpr constructs the comparison expression.
+func (m *mySQLParser) constructCompExpr(vSort *vSort, operator sqlparser.ComparisonExprOperator) (expr sqlparser.Expr, err error) {
+	qualifier, column, err := m.sanitize(vSort)
+	if err != nil {
+		return nil, err
+	}
+
+	col, err := m.getCursorValue(vSort)
+	if err != nil {
+		return nil, err
+	}
+
+	expr = &sqlparser.ComparisonExpr{
+		Operator: operator,
+		Left:     sqlparser.NewColNameWithQualifier(column, sqlparser.NewTableName(qualifier)),
+		Right:    col,
+	}
+	return expr, nil
+
+}
+
+// constructIsExpr constructs the IS expression.
+func (m *mySQLParser) constructIsExpr(vSort *vSort, op sqlparser.IsExprOperator) (expr sqlparser.Expr, err error) {
+	qualifier, column, err := m.sanitize(vSort)
+	if err != nil {
+		return nil, err
+	}
+
+	expr = &sqlparser.IsExpr{
+		Left:  sqlparser.NewColNameWithQualifier(column, sqlparser.NewTableName(qualifier)),
+		Right: op,
+	}
+
+	return
+}
+
+// createMultipleOrExpr creates multiple OR expressions.
+func (m *mySQLParser) createMultipleOrExpr(exprs ...sqlparser.Expr) sqlparser.Expr {
 	if len(exprs) == 0 {
 		return nil
 	}
@@ -201,7 +307,7 @@ func createMultipleOrExpr(exprs ...sqlparser.Expr) sqlparser.Expr {
 }
 
 // getOperator gets the operator for the cursor pagination.
-func getOperator(prefix string, orderType string) sqlparser.ComparisonExprOperator {
+func (m *mySQLParser) getOperator(prefix string, orderType string) sqlparser.ComparisonExprOperator {
 
 	var (
 		next     = prefix == "next"
@@ -221,71 +327,20 @@ func getOperator(prefix string, orderType string) sqlparser.ComparisonExprOperat
 	return operator
 }
 
-// getSlectColumns returns the select columns from the statement.
-// func (m *mySQLParser) getSelectColumns() (columnOriginal map[string]string, columnSanitized map[string]string, columnNullables map[string]bool, err error) {
-
-// 	var (
-// 		columns = m.stmt.SelectExprs
-// 	)
-
-// 	columnOriginal = make(map[string]string)
-// 	columnSanitized = make(map[string]string)
-// 	columnNullables = make(map[string]bool)
-
-// 	for _, col := range columns {
-// 		switch expr := col.(type) {
-// 		case *sqlparser.AliasedExpr:
-
-// 			var alias = expr.As.String()
-// 			var colName string
-// 			if alias == "" {
-// 				alias = expr.Expr.(*sqlparser.ColName).Name.String()
-// 			}
-
-// 			if col, ok := expr.Expr.(*sqlparser.ColName); ok {
-// 				if col.Qualifier.Name.String() != "" {
-// 					colName = fmt.Sprintf("%s.%s", col.Qualifier.Name.String(), col.Name.String())
-// 				} else {
-// 					colName = col.Name.String()
-// 				}
-// 			}
-// 			columnOriginal[alias] = colName
-
-// 		case *sqlparser.StarExpr:
-// 			err = fmt.Errorf("star expression is not supported")
-// 			return
-// 		}
-// 	}
-
-// 	for i := range columnOriginal {
-// 		val, err := url.Parse(i)
-// 		if err != nil {
-// 			return nil, nil, nil, errors.Wrap(err, "failed to parse query")
-// 		}
-
-// 		columnSanitized[val.Path] = columnOriginal[i]
-// 		columnNullables[val.Path] = val.Query().Get("nullable") == "true"
-// 	}
-
-// 	return
-
-// }
-
-// cursorSetLimitAndSort sets the limit and sort for the cursor pagination.
-func (m *mySQLParser) cursorSetLimitAndSort() error {
+// applyLimitAndSorts applies the limit and sorts to the sql query.
+func (m *mySQLParser) applyLimitAndSorts() error {
 
 	var (
 		limit  = m.uTabling.uPaging.Limit
 		vSorts = *m.vTabling.vSorts
 	)
 
+	// reverse the sorting if the cursor is previous
 	if m.vTabling.vCursor != nil {
 		if m.vTabling.vCursor.Prefix.isPrev() {
 			vSorts = m.vTabling.vSorts.reverseDirection()
 		}
 	}
-
-	// vSorts = append(vSorts, vSort{column: m.uTabling.uPaging.ColumnID, direction: sqlparser.AscOrder})
 
 	// set limit to limit + 1
 	m.stmt.SetLimit(&sqlparser.Limit{
@@ -297,7 +352,7 @@ func (m *mySQLParser) cursorSetLimitAndSort() error {
 
 }
 
-// addSorting adds the sorting for the sql query.
+// applySorts applies the sorting to the sql query.
 func (m *mySQLParser) applySorts(vSorts *vSorts) error {
 
 	for _, vSort := range *vSorts {
@@ -340,20 +395,4 @@ func (m *mySQLParser) applySorts(vSorts *vSorts) error {
 	}
 
 	return nil
-}
-
-// setSorting sets the sorting for the sql query.
-func (m *mySQLParser) setSorts() error {
-
-	var (
-		vSorts = m.vTabling.vSorts
-	)
-
-	// return if sorting is nil
-	if vSorts == nil {
-		return nil
-	}
-
-	return m.applySorts(vSorts)
-
 }
