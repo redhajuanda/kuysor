@@ -12,6 +12,8 @@ type Kuysor struct {
 	uTabling *uTabling
 	vTabling *vTabling
 	options  Options
+	uArgs    []any
+	vArgs    []any
 }
 
 // New creates a new Kuysor instance.
@@ -35,6 +37,14 @@ func New(sql string, opt ...Options) *Kuysor {
 		}
 	}
 
+	return p
+
+}
+
+// WithArgs sets the arguments for the query.
+func (p *Kuysor) WithArgs(args ...any) *Kuysor {
+
+	p.uArgs = args
 	return p
 
 }
@@ -89,14 +99,14 @@ func (p *Kuysor) WithSort(sorts ...string) *Kuysor {
 }
 
 // Build builds the paginated / sorted query.
-func (p *Kuysor) Build() (string, error) {
+func (p *Kuysor) Build() (string, []any, error) {
 
 	return p.build()
 
 }
 
 // build builds the paginated / sorted query.
-func (p *Kuysor) build() (string, error) {
+func (p *Kuysor) build() (string, []any, error) {
 
 	var (
 		result string
@@ -104,25 +114,28 @@ func (p *Kuysor) build() (string, error) {
 
 	// validate user input
 	if p.uTabling == nil {
-		return result, errors.New("nothing to build")
+		return result, p.uArgs, errors.New("nothing to build")
 	}
 	if p.uTabling.uPaging != nil && p.uTabling.uSort == nil {
-		return result, errors.New("sort is required for cursor pagination")
+		return result, nil, errors.New("sort is required for cursor pagination")
+	}
+	if p.uArgs == nil {
+		p.uArgs = make([]any, 0)
 	}
 
 	// prepare vTabling
 	err := p.prepareVTabling()
 	if err != nil {
-		return result, fmt.Errorf("failed to prepare vTabling: %v", err)
+		return result, nil, fmt.Errorf("failed to prepare vTabling: %v", err)
 	}
 
 	// build query based on the dialect
 	switch p.options.Dialect {
 	case MySQL:
-		result, err = newMySQLParser(p).Build()
+		result, err = newMySQL(p).build()
 	}
 
-	return result, err
+	return result, p.uArgs, err
 }
 
 // prepareVTabling prepares the vTabling data.
@@ -219,8 +232,13 @@ func (p *Kuysor) SanitizeMap(data *[]map[string]interface{}) (next string, prev 
 
 	for _, vSort := range *vSorts {
 
-		cursorPrev.Cols[vSort.column] = (*data)[0][vSort.column]
-		cursorNext.Cols[vSort.column] = (*data)[totalDataUpdated-1][vSort.column]
+		_, column, err := vSort.extractColumn()
+		if err != nil {
+			return next, prev, err
+		}
+
+		cursorPrev.Cols[column] = (*data)[0][column]
+		cursorNext.Cols[column] = (*data)[totalDataUpdated-1][column]
 
 	}
 

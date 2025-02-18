@@ -11,10 +11,24 @@ import (
 func replaceBindVariables(sql string) string {
 	// replace all bind variables with format :v1, :v2, etc to ?
 	re := regexp.MustCompile(`:\bv\d+\b`)
-
-	// Ganti semua yang match dengan ?
 	return re.ReplaceAllString(sql, "?")
 
+}
+
+func findParamOrder(query, param string) []int {
+	var indexes []int
+	// Regex to match :v0, :v1, :v2, ...
+	re := regexp.MustCompile(`:(v\d+)`)
+	matches := re.FindAllString(query, -1)
+
+	// Loop through all matches and check which ones are equal to param
+	for i, match := range matches {
+		if match == param {
+			indexes = append(indexes, i)
+		}
+	}
+
+	return indexes
 }
 
 // Function to reverse a slice of maps

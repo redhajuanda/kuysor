@@ -7,64 +7,89 @@ import (
 
 func TestFirstPage(t *testing.T) {
 	var testCases = []struct {
-		in      string
-		out     string
-		orderBy []string
+		in        string
+		out       string
+		orderBy   []string
+		paramsIn  []any
+		paramsOut []any
 	}{
 		{
-			in:      "SELECT * FROM `table`",
-			orderBy: []string{"-id"},
-			out:     "SELECT * FROM `table` ORDER BY id DESC LIMIT 11",
+			in:        "SELECT * FROM `table`",
+			orderBy:   []string{"-id"},
+			out:       "SELECT * FROM `table` ORDER BY id DESC LIMIT ?",
+			paramsOut: []any{11},
 		},
 		{
-			in:      "SELECT * FROM `table`",
-			orderBy: []string{"-code", "-id"},
-			out:     "SELECT * FROM `table` ORDER BY `code` DESC, id DESC LIMIT 11",
+			in:        "SELECT * FROM `table`",
+			orderBy:   []string{"-code", "-id"},
+			out:       "SELECT * FROM `table` ORDER BY `code` DESC, id DESC LIMIT ?",
+			paramsOut: []any{11},
 		},
 		{
-			in:      "SELECT * FROM `table`",
-			orderBy: []string{"code", "+id"},
-			out:     "SELECT * FROM `table` ORDER BY `code` ASC, id ASC LIMIT 11",
+			in:        "SELECT * FROM `table`",
+			orderBy:   []string{"code", "+id"},
+			out:       "SELECT * FROM `table` ORDER BY `code` ASC, id ASC LIMIT ?",
+			paramsOut: []any{11},
 		},
 		{
-			in:      "SELECT * FROM `table`",
-			orderBy: []string{"code", "-id"},
-			out:     "SELECT * FROM `table` ORDER BY `code` ASC, id DESC LIMIT 11",
+			in:        "SELECT * FROM `table`",
+			orderBy:   []string{"code", "-id"},
+			out:       "SELECT * FROM `table` ORDER BY `code` ASC, id DESC LIMIT ?",
+			paramsOut: []any{11},
 		},
 		{
-			in:      "SELECT * FROM `table` as t",
-			orderBy: []string{"t.code", "-t.id"},
-			out:     "SELECT * FROM `table` as t ORDER BY t.`code` ASC, t.id DESC LIMIT 11",
+			in:        "SELECT * FROM `table` as t",
+			orderBy:   []string{"t.code", "-t.id"},
+			out:       "SELECT * FROM `table` as t ORDER BY t.`code` ASC, t.id DESC LIMIT ?",
+			paramsOut: []any{11},
 		},
 		{
-			in:      "SELECT * FROM `table` as t",
-			orderBy: []string{"t.code", "-t.id", "t.name"},
-			out:     "SELECT * FROM `table` as t ORDER BY t.`code` ASC, t.id DESC, t.`name` ASC LIMIT 11",
+			in:        "SELECT * FROM `table` as t",
+			orderBy:   []string{"t.code", "-t.id", "t.name"},
+			out:       "SELECT * FROM `table` as t ORDER BY t.`code` ASC, t.id DESC, t.`name` ASC LIMIT ?",
+			paramsOut: []any{11},
 		},
 		{
-			in:      "SELECT * FROM `table` as t WHERE t.id = 1",
-			orderBy: []string{"t.code", "-t.id", "t.name"},
-			out:     "SELECT * FROM `table` as t WHERE t.id = 1 ORDER BY t.`code` ASC, t.id DESC, t.`name` ASC LIMIT 11",
+			in:        "SELECT * FROM `table` as t WHERE t.id = ?",
+			orderBy:   []string{"t.code", "-t.id", "t.name"},
+			out:       "SELECT * FROM `table` as t WHERE t.id = ? ORDER BY t.`code` ASC, t.id DESC, t.`name` ASC LIMIT ?",
+			paramsIn:  []any{1},
+			paramsOut: []any{1, 11},
 		},
 		{
-			in:      "SELECT * FROM `table` as t GROUP BY t.id",
-			orderBy: []string{"t.code", "-t.id", "t.name"},
-			out:     "SELECT * FROM `table` as t GROUP BY t.id ORDER BY t.`code` ASC, t.id DESC, t.`name` ASC LIMIT 11",
+			in:        "SELECT * FROM `table` as t GROUP BY t.id",
+			orderBy:   []string{"t.code", "-t.id", "t.name"},
+			out:       "SELECT * FROM `table` as t GROUP BY t.id ORDER BY t.`code` ASC, t.id DESC, t.`name` ASC LIMIT ?",
+			paramsOut: []any{11},
 		},
 	}
 
 	for _, tc := range testCases {
 		p := New(tc.in)
 		p.WithSort(tc.orderBy...).WithLimit(10)
-		sql, err := p.Build()
+		if len(tc.paramsIn) > 0 {
+			p.WithArgs(tc.paramsIn...)
+		}
+		sql, params, err := p.Build()
 		if err != nil {
 			t.Error(err)
 		}
+
+		// fmt.Println("==>", sql, params)
 
 		expected := strings.ToLower(tc.out)
 		got := strings.ToLower(sql)
 		if got != expected {
 			t.Errorf("Expected %s, got %s", expected, got)
+		}
+
+		if len(params) != len(tc.paramsOut) {
+			t.Errorf("Expected %d params, got %d", len(tc.paramsOut), len(params))
+		}
+		for i, v := range params {
+			if v != tc.paramsOut[i] {
+				t.Errorf("Expected %v, got %v", tc.paramsOut[i], v)
+			}
 		}
 	}
 }

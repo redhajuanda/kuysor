@@ -6,7 +6,6 @@ type uTabling struct {
 }
 
 type vTabling struct {
-	// pagingType *PagingType
 	vCursor *vCursor
 	vSorts  *vSorts
 }
