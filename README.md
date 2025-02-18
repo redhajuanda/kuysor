@@ -53,33 +53,41 @@ import (
 
 func main() {
 
-    query := `SELECT a.id, a.code, a.name FROM account a`
-    
-	ky := kuysor.
+    query := `SELECT a.id, a.code, a.name FROM account a WHERE a.status = ?`
+    args := []interface{}{"active"}
+
+	ks := kuysor.
 		New(query).
 		WithLimit(10). // limit is optional, if not set, it will check the default limit from `.SetOptions` or if also not set, it will use 10 as default limit
-		WithSort("a.code", "-a.id") // sort is required for cursor pagination
+		WithSort("a.code", "-a.id"). // sort is required for cursor pagination
+        WithArgs(args...) // args is your query arguments, it is needed because kuysor will also modify the args
 
-	finalQuery, err := ky.Build()
+	finalQuery, finalArgs, err := ks.Build() // kuysor returns the final query and the args 
 	if err != nil {
 		panic(err)
 	}
 }
 ```
 
-Generated SQL Query:
+Return query:
 ```sql
-SELECT a.id, a.code, a.name FROM account a ORDER BY a.code ASC, a.id DESC LIMIT 11
+SELECT a.id, a.code, a.name FROM account a WHERE a.status = ? ORDER BY a.code ASC, a.id DESC LIMIT ?
 ```
+Return args:
+```go
+["active", 11]
+```
+In the first page, kuysor modified your query to include the limit and sorting order. Kuysor also applies SQL placeholders to the limit to prevent SQL injection.
+That's why kuysor requires you to pass the args, so it can modify the args as well.
 
 ### Sorting Rules
-- Use WithSort to define multiple sorting columns.
-- Prefix columns with - for descending order and + for ascending order (default is ascending).
-- If sorting involves nullable columns, specify them explicitly.
+- Use WithSort to define one or multiple sorting columns.
+- Prefix columns with `-` for descending order and `+` for ascending order (default is ascending).
+- If sorting involves nullable columns, specify them explicitly by adding `nullable` after the column name.
 ```go
 WithSort("+name nullable", "code", "-id")
 ```
-Generated SQL Query:
+Return query:
 ```sql
 ORDER BY name IS NULL ASC, name ASC, code ASC, id DESC
 ```
@@ -92,16 +100,100 @@ To make it simple, I recommend to always use the last column as a tie breaker by
 Tie breaker column also can be set to use ascendant or descendant order.
 
 ```go
-    WithSort("name", "code", "-id")
+WithSort("name", "code", "-id")
 ```
 or
 ```go
-    WithOrder("name", "code", "id")
+WithOrder("name", "code", "id")
 ```
+
+### Fetching and Sanitizing Results
+
+If you notice, even though you set the limit to 10, kuysor will set the limit to 11. This is because kuysor needs to check if there are more data to fetch. If the data is 11, then there are more data to fetch, if the data is less than 11, then there are no more data to fetch.
+So, to sanitize the result, like trimming the last data, reversing the order if the cursor is previous, and generate the next and previous cursor, you can use `SanitizeStruct` or `SanitizeMap` function.
+
+```go
+package main
+
+import (
+	"database/sql"
+	"fmt"
+
+	_ "github.com/go-sql-driver/mysql"
+	"github.com/redhajuanda/kuysor"
+)
+
+type Account struct {
+	ID     int     `kuysor:"a.id"`
+	Code   string  `kuysor:"a.code"`
+	Name   string  `kuysor:"a.name"`
+}
+
+func main() {
+
+	// connect mysql
+	db, err := sql.Open("mysql", "mariadb:mariadb@tcp(localhost:3300)/db_app")
+	if err != nil {
+		panic(err)
+	}
+
+	query := `SELECT a.id, a.code, a.name FROM account a WHERE a.status = ?`
+	args := []interface{}{"active"}
+
+	ks := kuysor.
+		New(query).
+		WithLimit(10).
+		WithSort("a.code", "-a.id").
+		WithArgs(args...)
+
+	finalQuery, finalArgs, err := ks.Build()
+	if err != nil {
+		panic(err)
+	}
+
+	// execute the query and get the result
+	rows, err := db.Query(finalQuery, finalArgs...)
+	if err != nil {
+		panic(err)
+	}
+	defer rows.Close()
+
+	var result = make([]Account, 0)
+
+	for rows.Next() {
+		var row Account
+		err = rows.Scan(&row.ID, &row.Code, &row.Name)
+		if err != nil {
+			panic(err)
+		}
+		result = append(result, row)
+	}
+
+	nextCursor, prevCursor, err := ks.SanitizeStruct(&result)
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Println(result)
+	fmt.Println(nextCursor)
+	fmt.Println(prevCursor)
+}
+```
+To generate the next and previous cursor, kuysor will automatically check from your struct result. Due to the possibility of different name between the struct field and the column name in the query, you need to add the kuysor tag to the struct fields to match the column name in the query.
+
+```go
+type Account struct {
+    ID   int    `kuysor:"a.id"`
+    Code string `kuysor:"a.code"`
+    Name string `kuysor:"a.name"`
+}
+```
+
+SanitizeStruct will return the next and previous cursor, if there are no more data to fetch, the next cursor will be empty. If the cursor is the first page, the previous cursor will be empty.
 
 ### Retrieving the Next Page
 
-To fetch the next page, include the cursor from the previous query result.
+To fetch the next page, you just need to include the cursor from the previous query result.
 
 ```go
 package main
@@ -113,220 +205,113 @@ import (
 
 func main() {
 
-    query := `SELECT a.id, a.code, a.name FROM account a`
+    query := `SELECT a.id, a.code, a.name FROM account a WHERE a.status = ?`
+    args := []interface{}{"active"}
     
-    ky := kuysor.
+    ks := kuysor.
         New(query).
-        WithLimit(10). // limit is optional, if not set, it will check the default limit from `.SetOptions` or if also not set, it will use 10 as default limit
-        WithSort("a.code", "-a.id"). // sort is required for cursor pagination
+        WithLimit(10). 
+        WithSort("a.code", "-a.id"). 
+        WithArgs(args...).
         WithCursor("xxx") // the query will start from the cursor
 
-    finalQuery, err := ky.Build()
+    finalQuery, err := ks.Build()
     if err != nil {
         panic(err)
     }
 }
 ```
 
-Generated SQL Query:
+Return query:
 ```sql
 SELECT a.id, a.`code`, a.`name` FROM account as a 
-WHERE a.`code` > 'C' 
-OR (a.`code` = 'C' AND a.id < 3) 
+WHERE a.`status` = ? AND 
+(a.`code` > ? OR (a.`code` = ? AND a.id < ?))
 ORDER BY a.`code` ASC, a.id DESC 
-LIMIT 11
+LIMIT ?
+```
+Return args:
+```go
+["active", "C", "C", 3, 11]
 ```
 
-### Processing the Query Result
-Kuysor supports mapping results into either a slice of structs or a slice of map[string]interface{}.
-
-
-Struct Mapping
+### Processing the Query Result With `SanitizeMap()`
 
 ```go
 package main
 
-type Account struct {
-    ID   int    `kuysor:"a.id"`
-    Code string `kuysor:"a.code"`
-    Name string `kuysor:"a.name"`
-}
-```
-Ensure that struct tags align with the column names used in sorting.
-
-### Full Example with `db/sql` using map
-```go
-package main
-
 import (
-    "database/sql"
-    "fmt"
-    "github.com/redhajuanda/kuysor"
-    _ "github.com/go-sql-driver/mysql"
+	"database/sql"
+	"fmt"
+
+	_ "github.com/go-sql-driver/mysql"
+	"github.com/redhajuanda/kuysor"
 )
 
 func main() {
-    db, err := sql.Open("mysql", "...")
-    if err != nil {
-        panic(err)
-    }
 
-    query := `SELECT a.id, a.code, a.name FROM account a`
+	// connect mysql
+	db, err := sql.Open("mysql", "xxx:xxx@tcp(localhost:3300)/xxx")
+	if err != nil {
+		panic(err)
+	}
 
-    ky := kuysor.
-        New(query).
-        WithLimit(10). 
-        WithSort("a.code", "-a.id") 
+	query := `SELECT a.id as id, a.code as code, a.name as name FROM tester a WHERE a.status = ?`
+	args := []any{"active"}
 
-    finalQuery, err := ky.Build()
+	ks := kuysor.
+		New(query).
+		WithLimit(10).
+		WithSort("code", "-id").
+		WithArgs(args...)
 
-    rows, err := db.Query(finalQuery)
+	finalQuery, finalArgs, err := ks.Build()
+	if err != nil {
+		panic(err)
+	}
 
-    if err != nil {
-        panic(err)
-    }
+	rows, err := db.Query(finalQuery, finalArgs...)
+	if err != nil {
+		panic(err)
+	}
+	defer rows.Close()
 
-    defer rows.Close()
+	var result []map[string]interface{}
 
-    var result []map[string]interface{}
+	for rows.Next() {
+		var (
+			id   int
+			code string
+			name *string
+			row  = make(map[string]interface{})
+		)
 
-    for rows.Next() {
-        row := make(map[string]interface{})
-        err = rows.Scan(&row["id"], &row["code"], &row["name"])
-        if err != nil {
-            panic(err)
-        }
-        result = append(result, row)
-    }
+		err = rows.Scan(&id, &code, &name)
+		if err != nil {
+			panic(err)
+		}
 
-    nextCursor, prevCursor, err := ky.SanitizeMap(result)
-    if err != nil {
-        panic(err)
-    }
+		row["id"] = id
+		row["code"] = code
+		row["name"] = name
 
-    fmt.Println(result)
-    fmt.Println(nextCursor)
-    fmt.Println(prevCursor)
+		result = append(result, row)
+	}
 
-}
-```
+	nextCursor, prevCursor, err := ks.SanitizeMap(&result)
+	if err != nil {
+		panic(err)
+	}
 
-### Full Example with `db/sql` using struct
-```go   
-package main
-
-import (
-    "database/sql"
-    "fmt"
-    "github.com/redhajuanda/kuysor"
-    _ "github.com/go-sql-driver/mysql"
-)
-
-type Account struct {
-    ID   int    `kuysor:"a.id"`
-    Code string `kuysor:"a.code"`
-    Name string `kuysor:"a.name"`
-}
-
-func main() {
-    db, err := sql.Open("mysql", "...")
-    if err != nil {
-        panic(err)
-    }
-
-    query := `SELECT a.id, a.code, a.name FROM account a`
-
-    ky := kuysor.
-        New(query).
-        WithLimit(10). 
-        WithSort("a.code", "-a.id") 
-
-    finalQuery, err := ky.Build()
-
-    rows, err := db.Query(finalQuery)
-
-    if err != nil {
-        panic(err)
-    }
-
-    defer rows.Close()
-
-    var result []Account
-
-    for rows.Next() {
-        var row Account
-        err = rows.Scan(&row.ID, &row.Code, &row.Name)
-        if err != nil {
-            panic(err)
-        }
-        result = append(result, row)
-    }
-
-    nextCursor, prevCursor, err := ky.SanitizeStruct(result)
-    if err != nil {
-        panic(err)
-    }
-
-    fmt.Println(result)
-    fmt.Println(nextCursor)
-    fmt.Println(prevCursor)
-
-}
-```
-
-### Full Example with `jmoiron/sqlx` using struct
-```go
-package main
-
-import (
-    "fmt"
-    "github.com/jmoiron/sqlx"
-    "github.com/redhajuanda/kuysor"
-    _ "github.com/go-sql-driver/mysql"
-)
-
-type Account struct {
-    ID   int    `kuysor:"a.id"`
-    Code string `kuysor:"a.code"`
-    Name string `kuysor:"a.name"`
-}
-
-func main() {
-    db, err := sqlx.Connect("mysql", "...")
-    if err != nil {
-        panic(err)
-    }
-
-    query := `SELECT a.id, a.code, a.name FROM account a`
-
-    ky := kuysor.
-        New(query).
-        WithLimit(10). 
-        WithSort("a.code", "-a.id") 
-
-    finalQuery, err := ky.Build()
-
-    var result []Account
-
-    err = db.Select(&result, finalQuery)
-    if err != nil {
-        panic(err)
-    }
-
-    nextCursor, prevCursor, err := ky.SanitizeStruct(result)
-    if err != nil {
-        panic(err)
-    }
-
-    fmt.Println(result)
-    fmt.Println(nextCursor)
-    fmt.Println(prevCursor)
-
+	fmt.Println(result)
+	fmt.Println(nextCursor)
+	fmt.Println(prevCursor)
 }
 ```
 
 ### Limitation
 - Kuysor currently only supports MySQL dialect
 - It requires that the ordering is based on at least one unique column or a combination of columns that are unique. 
+- Each column in the sort must be included in the SELECT statement, and the column name must be matched. As it uses the result of the column to generate the next and previous cursor.
 - Only one nullable column is allowed in the sort, due to complexity of the query, it will beat the purpose of using cursor pagination in the first place.
 - You need to handle indexing properly to make the query efficient.
