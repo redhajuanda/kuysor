@@ -109,9 +109,11 @@ WithOrder("name", "code", "id")
 
 ### Fetching and Sanitizing Results
 
-If you notice, even though you set the limit to 10, kuysor will set the limit to 11. This is because kuysor needs to check if there are more data to fetch. If the data is 11, then there are more data to fetch, if the data is less than 11, then there are no more data to fetch.
-So, to sanitize the result, like trimming the last data, reversing the order if the cursor is previous, and generate the next and previous cursor, you can use `SanitizeStruct` or `SanitizeMap` function.
+Even if you set the limit to 10, Kuysor will automatically set it to 11. This is because it needs to check if more data is available. If the result contains 11 items, there are more pages to fetch; if it's less than 11, there are no more pages to load.
 
+Since cursor pagination can sometimes return extra data or even reverse the order of results, data sanitization is necessary. To handle this, you can use the `SanitizeStruct()` or `SanitizeMap()` function. These functions will trim the extra data, correct the order when using a previous cursor, and generate the next and previous cursors properly.
+
+Here's an example of how to use `SanitizeStruct()` to sanitize the query result:
 ```go
 package main
 
@@ -169,7 +171,7 @@ func main() {
 		result = append(result, row)
 	}
 
-	nextCursor, prevCursor, err := ks.SanitizeStruct(&result)
+	nextCursor, prevCursor, err := ks.SanitizeStruct(&result) // pass the pointer of the result, so kuysor can modify it
 	if err != nil {
 		panic(err)
 	}
@@ -179,7 +181,7 @@ func main() {
 	fmt.Println(prevCursor)
 }
 ```
-To generate the next and previous cursor, kuysor will automatically check from your struct result. Due to the possibility of different name between the struct field and the column name in the query, you need to add the kuysor tag to the struct fields to match the column name in the query.
+To generate the next and previous cursor, Kuysor automatically checks your struct result. Since the struct field names may differ from the column names in the query, you need to add a kuysor tag to the struct fields to match the column names.
 
 ```go
 type Account struct {
@@ -189,11 +191,11 @@ type Account struct {
 }
 ```
 
-SanitizeStruct will return the next and previous cursor, if there are no more data to fetch, the next cursor will be empty. If the cursor is the first page, the previous cursor will be empty.
+`SanitizeStruct()` returns the next and previous cursors. If there is no more data to fetch, the next cursor will be empty. If the cursor is on the first page, the previous cursor will be empty.
 
 ### Retrieving the Next Page
 
-To fetch the next page, you just need to include the cursor from the previous query result.
+To fetch the next page, simply include the cursor from the previous query result.
 
 ```go
 package main
@@ -312,6 +314,6 @@ func main() {
 ### Limitation
 - Kuysor currently only supports MySQL dialect
 - It requires that the ordering is based on at least one unique column or a combination of columns that are unique. 
-- Each column in the sort must be included in the SELECT statement, and the column name must be matched. As it uses the result of the column to generate the next and previous cursor.
+- Each column in the sort must be included in the SELECT statement, and the column names must match exactly. This is because Kuysor uses the column values to generate the next and previous cursors.
 - Only one nullable column is allowed in the sort, due to complexity of the query, it will beat the purpose of using cursor pagination in the first place.
 - You need to handle indexing properly to make the query efficient.
