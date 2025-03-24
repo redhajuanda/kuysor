@@ -8,12 +8,13 @@ import (
 )
 
 type Kuysor struct {
-	sql      string
-	uTabling *uTabling
-	vTabling *vTabling
-	options  Options
-	uArgs    []any
-	vArgs    []any
+	sql             string
+	placeHolderType PlaceHolderType
+	uTabling        *uTabling
+	vTabling        *vTabling
+	options         Options
+	uArgs           []any
+	vArgs           []any
 }
 
 // New creates a new Kuysor instance.
@@ -31,11 +32,13 @@ func New(sql string, opt ...Options) *Kuysor {
 		p.options = *options
 	} else { // set default options
 		p.options = Options{
-			Dialect:      MySQL,
-			DefaultLimit: defaulLimit,
-			StructTag:    defaultStructTag,
+			PlaceHolderType: Question,
+			DefaultLimit:    defaulLimit,
+			StructTag:       defaultStructTag,
 		}
 	}
+
+	p.placeHolderType = p.options.PlaceHolderType
 
 	return p
 
@@ -45,6 +48,15 @@ func New(sql string, opt ...Options) *Kuysor {
 func (p *Kuysor) WithArgs(args ...any) *Kuysor {
 
 	p.uArgs = args
+	return p
+
+}
+
+// WithPlaceHolderType sets the placeholder type for the query.
+// If not provided, it will use the default placeholder from the options or the default options.
+func (p *Kuysor) WithPlaceHolderType(placeHolderType PlaceHolderType) *Kuysor {
+
+	p.placeHolderType = placeHolderType
 	return p
 
 }
@@ -129,12 +141,7 @@ func (p *Kuysor) build() (string, []any, error) {
 		return result, nil, fmt.Errorf("failed to prepare vTabling: %v", err)
 	}
 
-	// build query based on the dialect
-	switch p.options.Dialect {
-	case MySQL:
-		result, err = newMySQL(p).build()
-	}
-
+	result, err = newBuilder(p).build()
 	return result, p.uArgs, err
 }
 

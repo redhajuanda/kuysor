@@ -1,9 +1,9 @@
 package kuysor
 
 type Options struct {
-	Dialect      Dialect
-	DefaultLimit int
-	StructTag    string
+	PlaceHolderType PlaceHolderType
+	DefaultLimit    int
+	StructTag       string
 }
 
 var (

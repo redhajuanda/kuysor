@@ -20,7 +20,7 @@ go get github.com/redhajuanda/kuysor
 
 ### Configuring Options (Optional)
 
-You can configure Kuysor with default settings such as database dialect, default limit, and struct tags.
+You can configure Kuysor with default settings such as default limit, and struct tags.
 
 ```go
 package main
@@ -32,7 +32,6 @@ import (
 
 func main() {
     kuysor.SetOptions(kuysor.Options{
-        Dialect: kuysor.MySQL, // default is MySQL (currently only support MySQL)
         DefaultLimit: 10, // default is 10
         StructTag: "kuysor", // default is `kuysor`
     })
@@ -60,9 +59,9 @@ func main() {
 		New(query).
 		WithLimit(10). // limit is optional, if not set, it will check the default limit from `.SetOptions` or if also not set, it will use 10 as default limit
 		WithSort("a.code", "-a.id"). // sort is required for cursor pagination
-        WithArgs(args...) // args is your query arguments, it is needed because kuysor will also modify the args
+        WithArgs(args...) // args is your query arguments, it is needed because kuysor will also modify the arguments
 
-	finalQuery, finalArgs, err := ks.Build() // kuysor returns the final query and the args 
+	finalQuery, finalArgs, err := ks.Build() // kuysor returns the final query and the final arguments 
 	if err != nil {
 		panic(err)
 	}
