@@ -321,7 +321,6 @@ func main() {
 ```
 
 ### Limitation
-- Kuysor currently only supports MySQL dialect
 - It requires that the ordering is based on at least one unique column or a combination of columns that are unique. 
 - Each column in the sort must be included in the SELECT statement, and the column names must match exactly. This is because Kuysor uses the column values to generate the next and previous cursors.
 - Only one nullable column is allowed in the sort, due to complexity of the query, it will beat the purpose of using cursor pagination in the first place.
