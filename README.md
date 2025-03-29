@@ -1,9 +1,17 @@
 # kuysor
 
-Kuysor is a lightweight Go SDK designed to facilitate cursor-based pagination queries. It supports ordering by multiple columns in both ascending and descending order.
+Kuysor is an SDK designed to simplify the implementation of cursor-based pagination in Golang.
 
 ## What is Cursor Pagination?
 Cursor-based pagination (aka Keyset Pagination) is a more efficient and scalable alternative to offset-based pagination, particularly for large datasets. Instead of specifying an offset, it uses a cursor—a unique identifier from the last retrieved record—to determine the starting point for the next / previous set of results.
+
+## Why choose kuysor?
+- Designed for simplicity and ease of use.
+- The only SDK built for this purpose.
+- Compatible with all SQL-based databases.
+- Supports multiple sorting columns and ordering directions.
+- Handles nullable columns in sorting (supports up to one nullable column).
+- Built with zero dependencies.
 
 ## How kuysor works?
 1. Kuysor modifies your SQL query to support cursor-based pagination, allowing you to set limits, sorting, and cursors.
@@ -20,7 +28,7 @@ go get github.com/redhajuanda/kuysor
 
 ### Configuring Options (Optional)
 
-You can configure Kuysor with default settings such as default limit, and struct tags.
+You can customize Kuysor’s default settings, such as the default limit, placeholder type, and struct tags.
 
 ```go
 package main
@@ -31,16 +39,18 @@ import (
 )
 
 func main() {
+    // (Optional) Configure Kuysor with custom settings
     kuysor.SetOptions(kuysor.Options{
-        DefaultLimit: 10, // default is 10
-        StructTag: "kuysor", // default is `kuysor`
+        PlaceHolderType: kuysor.Question, // Default: `Question`. Options: `Question`, `Dollar`, `At`
+        DefaultLimit:    10,              // Default: 10. Specifies the default query limit.
+        StructTag:      "kuysor",         // Default: `kuysor`. Defines the struct tag used for field mapping.
     })
 }
 ```
 
 ### Retrieving the First Page
 
-For initial queries, you can set the limit and sorting order. 
+When fetching the first page of results, you must define the sorting order, as it's required for cursor pagination. Setting a limit is optional.
 
 ```go
 package main
@@ -57,11 +67,11 @@ func main() {
 
 	ks := kuysor.
 		New(query).
-		WithLimit(10). // limit is optional, if not set, it will check the default limit from `.SetOptions` or if also not set, it will use 10 as default limit
-		WithSort("a.code", "-a.id"). // sort is required for cursor pagination
-        WithArgs(args...) // args is your query arguments, it is needed because kuysor will also modify the arguments
+		WithSort("a.code", "-a.id"). 	// Required. Defines the order by. Prefix columns with `-` for descending order.
+		WithLimit(10). 					// Optional. Uses default from `.SetOptions` if set; otherwise, defaults to 10.
+        WithArgs(args...) 				// Required if the original query has placeholders. 
 
-	finalQuery, finalArgs, err := ks.Build() // kuysor returns the final query and the final arguments 
+	finalQuery, finalArgs, err := ks.Build() // Kuysor returns the final query and the final arguments 
 	if err != nil {
 		panic(err)
 	}
@@ -70,19 +80,19 @@ func main() {
 
 Return query:
 ```sql
-SELECT a.id, a.code, a.name FROM account a WHERE a.status = ? ORDER BY a.code ASC, a.id DESC LIMIT ?
+SELECT a.id, a.code, a.name FROM account a WHERE a.status = ? ORDER BY a.code ASC, a.id DESC LIMIT ? -- ORDER BY and LIMIT are automatically appended based on the options
 ```
 Return args:
 ```go
-["active", 11]
+["active", 11] // 11 is automatically appended to the arguments based on the limit + 1, additional 1 is used to check if there are more data to fetch for the next page
 ```
-In the first page, kuysor modified your query to include the limit and sorting order. Kuysor also applies SQL placeholders to the limit to prevent SQL injection.
+In the first page, kuysor modified your query to include the limit and sorting order.Kuysor also applies SQL placeholders to the limit to prevent SQL injection.
 That's why kuysor requires you to pass the args, so it can modify the args as well.
-
+ 
 ### Sorting Rules
 - Use WithSort to define one or multiple sorting columns.
 - Prefix columns with `-` for descending order and `+` for ascending order (default is ascending).
-- If sorting involves nullable columns, specify them explicitly by adding `nullable` after the column name.
+- If sorting involves nullable columns, specify them explicitly by adding `nullable` after the column name. This is necessary to handle null values correctly, as they can affect the order of results, 
 ```go
 WithSort("+name nullable", "code", "-id")
 ```
@@ -236,6 +246,75 @@ Return args:
 ["active", "C", "C", 3, 11]
 ```
 
+### Processing the Query Result With `SanitizeStruct()`
+
+```go
+package main
+
+import (
+	"database/sql"
+	"fmt"
+
+	_ "github.com/go-sql-driver/mysql"
+	"github.com/redhajuanda/kuysor"
+)
+
+type Account struct {
+	ID   int    `kuysor:"a.id"`
+	Code string `kuysor:"a.code"`
+	Name string `kuysor:"a.name"`
+}
+
+func main() {
+
+	// connect mysql
+	db, err := sql.Open("mysql", "xxx:xxx@tcp(localhost:3300)/xxx")
+	if err != nil {
+		panic(err)
+	}
+
+	query := `SELECT a.id, a.code, a.name FROM account a WHERE a.status = ?`
+	args := []interface{}{"active"}
+
+	ks := kuysor.
+		New(query).
+		WithLimit(10).
+		WithSort("a.code", "-a.id").
+		WithArgs(args...)
+
+	finalQuery, finalArgs, err := ks.Build()
+	if err != nil {
+		panic(err)
+	}
+
+	rows, err := db.Query(finalQuery, finalArgs...)
+	if err != nil {
+		panic(err)
+	}
+	defer rows.Close()
+
+	var result = make([]Account, 0)
+
+	for rows.Next() {
+		var row Account
+		err = rows.Scan(&row.ID, &row.Code, &row.Name)
+		if err != nil {
+			panic(err)
+		}
+		result = append(result, row)
+	}
+
+	nextCursor, prevCursor, err := ks.SanitizeStruct(&result)
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Println(result)
+	fmt.Println(nextCursor)
+	fmt.Println(prevCursor)
+}
+```
+
 ### Processing the Query Result With `SanitizeMap()`
 
 ```go
@@ -257,7 +336,7 @@ func main() {
 		panic(err)
 	}
 
-	query := `SELECT a.id as id, a.code as code, a.name as name FROM tester a WHERE a.status = ?`
+	query := `SELECT a.id as id, a.code as code, a.name as name FROM account a WHERE a.status = ?`
 	args := []any{"active"}
 
 	ks := kuysor.
