@@ -67,9 +67,9 @@ func main() {
 
 	ks := kuysor.
 		New(query).
-		WithSort("a.code", "-a.id"). 	// Required. Defines the order by. Prefix columns with `-` for descending order.
-		WithLimit(10). 					// Optional. Uses default from `.SetOptions` if set; otherwise, defaults to 10.
-        WithArgs(args...) 				// Required if the original query has placeholders. 
+		WithSort("a.code", "-a.id"). // Required. Defines the order by. Prefix columns with `-` for descending order.
+		WithLimit(10).				 // Optional. Uses default from `.SetOptions` if set; otherwise, defaults to 10.
+        WithArgs(args...)			 // Required if the original query has placeholders. 
 
 	finalQuery, finalArgs, err := ks.Build() // Kuysor returns the final query and the final arguments 
 	if err != nil {
