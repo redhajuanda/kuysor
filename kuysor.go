@@ -35,6 +35,7 @@ func New(sql string, opt ...Options) *Kuysor {
 			PlaceHolderType: Question,
 			DefaultLimit:    defaulLimit,
 			StructTag:       defaultStructTag,
+			NullSortMethod:  defaultNullSortMethod,
 		}
 	}
 
@@ -95,15 +96,15 @@ func (p *Kuysor) WithCursor(cursor string) *Kuysor {
 
 }
 
-// WithSort sets the sorting / order for the query.
-func (p *Kuysor) WithSort(sorts ...string) *Kuysor {
+// WithOrderBy sets the sorting / order for the query.
+func (p *Kuysor) WithOrderBy(orderBy ...string) *Kuysor {
 
 	if p.uTabling == nil {
 		p.uTabling = &uTabling{}
 	}
 
 	p.uTabling.uSort = &uSort{
-		Sorts: sorts,
+		Sorts: orderBy,
 	}
 
 	return p
@@ -165,7 +166,7 @@ func (p *Kuysor) prepareVTabling() (err error) {
 	}
 
 	// parse sort
-	p.vTabling.vSorts = parseSort(p.uTabling.uSort.Sorts)
+	p.vTabling.vSorts = parseSort(p.uTabling.uSort.Sorts, p.options.NullSortMethod)
 
 	for _, vSort := range *p.vTabling.vSorts {
 		if vSort.isNullable() {

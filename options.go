@@ -4,6 +4,7 @@ type Options struct {
 	PlaceHolderType PlaceHolderType
 	DefaultLimit    int
 	StructTag       string
+	NullSortMethod  NullSortMethod
 }
 
 var (

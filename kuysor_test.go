@@ -66,7 +66,7 @@ func TestFirstPage(t *testing.T) {
 
 	for _, tc := range testCases {
 		p := New(tc.in)
-		p.WithSort(tc.orderBy...).WithLimit(10)
+		p.WithOrderBy(tc.orderBy...).WithLimit(10)
 		if len(tc.paramsIn) > 0 {
 			p.WithArgs(tc.paramsIn...)
 		}

@@ -67,7 +67,7 @@ func main() {
 
 	ks := kuysor.
 		New(query).
-		WithSort("a.code", "-a.id"). // Required. Defines the order by. Prefix columns with `-` for descending order.
+		WithOrderBy("a.code", "-a.id"). // Required. Defines the order by. Prefix columns with `-` for descending order.
 		WithLimit(10).				 // Optional. Uses default from `.SetOptions` if set; otherwise, defaults to 10.
         WithArgs(args...)			 // Required if the original query has placeholders. 
 
@@ -90,11 +90,11 @@ In the first page, kuysor modified your query to include the limit and sorting o
 That's why kuysor requires you to pass the args, so it can modify the args as well.
  
 ### Sorting Rules
-- Use WithSort to define one or multiple sorting columns.
+- Use WithOrderBy to define one or multiple sorting columns.
 - Prefix columns with `-` for descending order and `+` for ascending order (default is ascending).
 - If sorting involves nullable columns, specify them explicitly by adding `nullable` after the column name. This is necessary to handle null values correctly, as they can affect the order of results, 
 ```go
-WithSort("+name nullable", "code", "-id")
+WithOrderBy("+name nullable", "code", "-id")
 ```
 Return query:
 ```sql
@@ -109,7 +109,7 @@ To make it simple, I recommend to always use the last column as a tie breaker by
 Tie breaker column also can be set to use ascendant or descendant order.
 
 ```go
-WithSort("name", "code", "-id")
+WithOrderBy("name", "code", "-id")
 ```
 or
 ```go
@@ -154,7 +154,7 @@ func main() {
 	ks := kuysor.
 		New(query).
 		WithLimit(10).
-		WithSort("a.code", "-a.id").
+		WithOrderBy("a.code", "-a.id").
 		WithArgs(args...)
 
 	finalQuery, finalArgs, err := ks.Build()
@@ -222,7 +222,7 @@ func main() {
     ks := kuysor.
         New(query).
         WithLimit(10). 
-        WithSort("a.code", "-a.id"). 
+        WithOrderBy("a.code", "-a.id"). 
         WithArgs(args...).
         WithCursor("xxx") // the query will start from the cursor
 
@@ -273,7 +273,7 @@ func main() {
 	ks := kuysor.
 		New(query).
 		WithLimit(10).
-		WithSort("code", "-id").
+		WithOrderBy("code", "-id").
 		WithArgs(args...)
 
 	finalQuery, finalArgs, err := ks.Build()
@@ -325,3 +325,9 @@ func main() {
 - Each column in the sort must be included in the SELECT statement, and the column names must match exactly. This is because Kuysor uses the column values to generate the next and previous cursors.
 - Only one nullable column is allowed in the sort, due to complexity of the query, it will beat the purpose of using cursor pagination in the first place.
 - You need to handle indexing properly to make the query efficient.
+
+
+
+# Example API
+
+First, 

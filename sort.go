@@ -16,11 +16,20 @@ type uSort struct {
 	Sorts []string
 }
 
+type NullSortMethod uint8
+
+const (
+	CaseWhen  NullSortMethod = iota
+	FirstLast                = iota
+	BoolSort                 = iota
+)
+
 type vSort struct {
-	prefix    string
-	column    string
-	nullable  bool
-	direction orderDirection
+	prefix         string
+	column         string
+	nullable       bool
+	nullSortMethod NullSortMethod
+	direction      orderDirection
 }
 
 // isNullable returns true if the sort is nullable.
@@ -74,21 +83,46 @@ func (s vSorts) reverseDirection() vSorts {
 }
 
 // parseSort parses the sort string and returns the vSorts.
-func parseSort(sorts []string) *vSorts {
+func parseSort(sorts []string, defaultNullSortMethod NullSortMethod) *vSorts {
 
 	var sSorts = make(vSorts, 0)
 
 	for _, s := range sorts {
 		nullable := false
+		nullSortMethod := CaseWhen
 
-		if strings.HasSuffix(strings.ToLower(s), "nullable") {
+		// split the sort string into parts
+		s = strings.TrimSpace(s)
+
+		t := strings.Split(s, " ")
+		if len(t) > 1 {
+			if t[1] != "null" {
+				panic(fmt.Sprintf("unexpected syntax: %s", t[1]))
+			}
+
 			nullable = true
-			s = strings.TrimSuffix(s, " nullable")
+			s = t[0]
+
+			if len(t) > 2 {
+				switch t[2] {
+				case "case-when":
+					nullSortMethod = CaseWhen
+				case "first-last":
+					nullSortMethod = FirstLast
+				case "bool-sort":
+					nullSortMethod = BoolSort
+				default:
+					panic(fmt.Sprintf("invalid null sort method: %s", t[2]))
+				}
+			} else {
+				nullSortMethod = defaultNullSortMethod
+			}
 		}
+
 		if strings.HasPrefix(s, "-") {
-			sSorts = append(sSorts, vSort{column: strings.TrimPrefix(s, "-"), prefix: "-", direction: descOrder, nullable: nullable})
+			sSorts = append(sSorts, vSort{column: strings.TrimPrefix(s, "-"), prefix: "-", direction: descOrder, nullable: nullable, nullSortMethod: nullSortMethod})
 		} else {
-			sSorts = append(sSorts, vSort{column: strings.TrimPrefix(s, "+"), prefix: "+", direction: ascOrder, nullable: nullable})
+			sSorts = append(sSorts, vSort{column: strings.TrimPrefix(s, "+"), prefix: "+", direction: ascOrder, nullable: nullable, nullSortMethod: nullSortMethod})
 		}
 	}
 

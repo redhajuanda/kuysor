@@ -280,27 +280,35 @@ func (b *builder) applySorts(vSorts *vSorts) error {
 
 	for _, vSort := range *vSorts {
 
-		if vSort.isNullable() {
-			clause := vSort.column + " IS NULL"
-			if vSort.isAsc() {
-				clause += " ASC"
-			} else {
-				clause += " DESC"
-			}
-
-			clauses = append(clauses, clause)
-
-		}
-
-		clause := vSort.column
+		var direction string
 		if vSort.isAsc() {
-			clause += " ASC"
+			direction = "ASC"
 		} else {
-			clause += " DESC"
+			direction = "DESC"
 		}
 
-		clauses = append(clauses, clause)
+		if vSort.isNullable() && vSort.nullSortMethod == CaseWhen {
+			clauses = append(clauses, fmt.Sprintf("CASE WHEN %s IS NULL THEN 1 ELSE 0 END %s", vSort.column, direction))
 
+		}
+
+		if vSort.isNullable() && vSort.nullSortMethod == FirstLast {
+			var lf string
+			if vSort.isAsc() {
+				lf = "LAST"
+			} else {
+				lf = "FIRST"
+			}
+			clauses = append(clauses, fmt.Sprintf("%s %s NULLS %s", vSort.column, direction, lf))
+
+			continue
+		}
+
+		if vSort.isNullable() && vSort.nullSortMethod == BoolSort {
+			clauses = append(clauses, fmt.Sprintf("%s IS NULL %s", vSort.column, direction))
+		}
+
+		clauses = append(clauses, fmt.Sprintf("%s %s", vSort.column, direction))
 	}
 
 	b.sqlMod.SetOrderBy(clauses...)
