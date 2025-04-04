@@ -374,7 +374,7 @@ func main() {
 
 ## Advance Usage
 
-I wrote a brief article about how to use Kuysor in more detail, you can read it [here](https://medium.com/@redhajuanda/kuysor-a-simple-sdk-for-cursor-pagination-in-golang-4f1a0b2c3d7e).
+I wrote a brief article about how to use Kuysor in more detail, you can read it [here](https://medium.com/@redhajuanda/golang-kuysor-making-cursor-pagination-suck-less-7d71dead0c99).
 
 ## Limitation
 - It requires that the ordering is based on at least one unique column or a combination of columns that are unique. 
