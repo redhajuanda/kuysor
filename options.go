@@ -11,8 +11,23 @@ var (
 	options *Options
 )
 
-// SetOptions sets the global options, which will be used by all kuysor instances.
+// SetGlobalOptions sets the global options, which will be used by all kuysor instances.
 // This should be called at the beginning of the application.
-func SetOptions(opt Options) {
+func SetGlobalOptions(opt Options) {
 	options = &opt
+}
+
+// getGlobalOptions returns global options
+// if the global options never setted, it will set default options
+func getGlobalOptions() *Options {
+	if options == nil {
+		options = &Options{
+			PlaceHolderType: Question,
+			DefaultLimit:    defaulLimit,
+			StructTag:       defaultStructTag,
+			NullSortMethod:  defaultNullSortMethod,
+		}
+	}
+
+	return options
 }

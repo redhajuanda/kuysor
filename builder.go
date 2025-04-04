@@ -42,7 +42,7 @@ func (b *builder) build() (string, error) {
 		return "", err
 	}
 
-	fmt.Println("==> un-sanitized query =>", res)
+	// fmt.Println("==> un-sanitized query =>", res)
 
 	return b.sanitizeQuery(res), nil
 }
@@ -54,7 +54,7 @@ func (b *builder) sanitizeQuery(query string) string {
 	for i, o := range ord {
 		b.ks.uArgs = slices.Insert[[]any](b.ks.uArgs, o, b.ks.vArgs[i])
 	}
-	return replacePlaceholders(query, b.ks.placeHolderType)
+	return replacePlaceholders(query, b.ks.options.PlaceHolderType)
 
 }
 
