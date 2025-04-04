@@ -7,12 +7,12 @@ Tired of wrestling with complex SQL for cursor pagination? Kuysor is here to hel
 Cursor-based pagination (aka Keyset Pagination) is a more efficient and scalable alternative to offset-based pagination, particularly for large datasets. Instead of specifying an offset, it uses a cursor—a unique identifier from the last retrieved record—to determine the starting point for the next / previous set of results.
 
 ## Why choose kuysor?
-✅ Designed for simplicity and ease of use.
-✅ The only Go SDK built for this purpose.
-✅ Compatible with most if not all SQL-based databases
-✅ Supports multiple sorting columns and ordering directions.
-✅ Handles nullable columns in sorting (maximum one nullable column).
-✅ Zero dependencies.
+- Designed for simplicity and ease of use.
+- The only Go SDK built for this purpose.
+- Compatible with most if not all SQL-based databases
+- Supports multiple sorting columns and ordering directions.
+- Handles nullable columns in sorting (maximum one nullable column).
+- Zero dependencies.
 
 ## How kuysor works?
 1. Kuysor modifies your SQL query to support cursor-based pagination, appending the necessary `ORDER BY`, `LIMIT`, and `WHERE` clauses.
