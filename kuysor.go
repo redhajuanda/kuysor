@@ -15,15 +15,30 @@ type Kuysor struct {
 	vArgs    []any
 }
 
+type PaginationType string
+
+const (
+	Cursor PaginationType = "cursor"
+	Offset PaginationType = "offset"
+)
+
 // NewQuery creates a new Kuysor instance.
 // It accepts the SQL query.
-func NewQuery(query string) *Kuysor {
+func NewQuery(query string, paginationType PaginationType) *Kuysor {
 
 	p := &Kuysor{
 		sql: query,
 	}
 
 	p.options = getGlobalOptions()
+
+	if paginationType != "" {
+		p.uTabling = &uTabling{
+			uPaging: &uPaging{
+				PaginationType: paginationType,
+			},
+		}
+	}
 
 	return p
 
@@ -61,6 +76,23 @@ func (p *Kuysor) WithLimit(limit int) *Kuysor {
 	}
 
 	p.uTabling.uPaging.Limit = limit
+
+	return p
+
+}
+
+// WithOffset sets the offset for the query.
+func (p *Kuysor) WithOffset(offset int) *Kuysor {
+
+	if p.uTabling == nil {
+		p.uTabling = &uTabling{}
+	}
+
+	if p.uTabling.uPaging == nil {
+		p.uTabling.uPaging = &uPaging{}
+	}
+
+	p.uTabling.uPaging.Offset = offset
 
 	return p
 
@@ -120,15 +152,16 @@ func (p *Kuysor) Build() (*Result, error) {
 func (p *Kuysor) build() (*Result, error) {
 
 	var (
-		sql    string
-		result *Result
+		sql      string
+		result   *Result
+		uTabling = p.uTabling
 	)
 
 	// validate user input
-	if p.uTabling == nil {
+	if uTabling == nil {
 		return result, errors.New("nothing to build")
 	}
-	if p.uTabling.uPaging != nil && p.uTabling.uSort == nil {
+	if uTabling.uPaging != nil && uTabling.uPaging.PaginationType == Cursor && uTabling.uSort == nil {
 		return result, errors.New("sort is required for cursor pagination")
 	}
 	if p.uArgs == nil {
@@ -158,20 +191,69 @@ func (p *Kuysor) build() (*Result, error) {
 // vTabling is the parsed version of uTabling, it is used internally to build the query.
 func (p *Kuysor) prepareVTabling() (err error) {
 
-	var (
-		cursorBase64    = cursorBase64(p.uTabling.uPaging.Cursor)
-		counterNullable = 0
-	)
-
 	p.vTabling = &vTabling{}
+
+	if p.uTabling.uPaging != nil {
+		if p.uTabling.uPaging.PaginationType == Cursor {
+			err = p.prepareVTablingCursor()
+			if err != nil {
+				return fmt.Errorf("failed to prepare vTabling cursor: %v", err)
+			}
+		} else if p.uTabling.uPaging.PaginationType == Offset {
+			err = p.prepareVTablingOffset()
+			if err != nil {
+				return fmt.Errorf("failed to prepare vTabling offset: %v", err)
+			}
+		}
+	}
+	if p.uTabling.uSort != nil {
+		err = p.prepareVTablingSort()
+		if err != nil {
+			return fmt.Errorf("failed to prepare vTabling sort: %v", err)
+		}
+	}
+	return nil
+
+}
+
+func (p *Kuysor) prepareVTablingOffset() (err error) {
+
+	if p.uTabling.uPaging.Offset < 0 {
+		return errors.New("offset cannot be negative")
+	}
+
+	p.vTabling.vOffset = &vOffset{
+		Offset: p.uTabling.uPaging.Offset,
+	}
+
+	return nil
+
+}
+
+func (p *Kuysor) prepareVTablingCursor() (err error) {
+
+	var (
+		cursorBase64 = cursorBase64(p.uTabling.uPaging.Cursor)
+	)
 
 	// parse cursor
 	if cursorBase64 != "" {
 		p.vTabling.vCursor, err = cursorBase64.parse()
 		if err != nil {
-			return
+			return fmt.Errorf("failed to parse cursor: %v", err)
 		}
+	} else {
+		p.vTabling.vCursor = &vCursor{}
 	}
+
+	return nil
+}
+
+func (p *Kuysor) prepareVTablingSort() (err error) {
+
+	var (
+		counterNullable = 0
+	)
 
 	// parse sort
 	p.vTabling.vSorts = parseSort(p.uTabling.uSort.Sorts, p.options.NullSortMethod)
@@ -184,6 +266,5 @@ func (p *Kuysor) prepareVTabling() (err error) {
 	if counterNullable > 1 {
 		return errors.New("only one nullable sort is allowed")
 	}
-	return
-
+	return nil
 }

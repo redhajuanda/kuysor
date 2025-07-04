@@ -1,7 +1,9 @@
 package kuysor
 
 type uPaging struct {
-	Limit    int
-	Cursor   string
-	ColumnID string
+	PaginationType PaginationType
+	Limit          int
+	Offset         int    // only used for offset pagination
+	Cursor         string // only used for cursor pagination
+	ColumnID       string // only used for cursor pagination
 }

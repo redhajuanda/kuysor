@@ -238,6 +238,52 @@ func (m *SQLModifier) SetLimit(newLimit string) {
 	}
 }
 
+func (m *SQLModifier) SetOffset(newOffset string) {
+	offsetPos := m.findMainClausePosition("OFFSET")
+
+	if offsetPos == -1 {
+		// No OFFSET clause found, add before FETCH, FOR UPDATE, etc.
+		clauses := []string{"FETCH", "FOR UPDATE", "FOR SHARE", "LOCK IN SHARE MODE", "INTO"}
+		minPos := -1
+
+		for _, clause := range clauses {
+			clausePos := m.findMainClausePosition(clause)
+			if clausePos != -1 && (minPos == -1 || clausePos < minPos) {
+				minPos = clausePos
+			}
+		}
+
+		if minPos != -1 {
+			m.query = strings.TrimSpace(m.query[:minPos]) + fmt.Sprintf(" OFFSET %s ", newOffset) + m.query[minPos:]
+			return
+		}
+
+		// No other clauses found, add to the end
+		m.query = m.query + fmt.Sprintf(" OFFSET %s", newOffset)
+		return
+	} else {
+		// Replace the existing OFFSET clause
+		// First, find where the OFFSET clause ends (typically the end of the query or another clause)
+		clauses := []string{"FETCH", "FOR UPDATE", "FOR SHARE", "LOCK IN SHARE MODE", "INTO"}
+		nextClausePos := -1
+
+		for _, clause := range clauses {
+			pos := m.findMainClausePosition(clause)
+			if pos != -1 && pos > offsetPos && (nextClausePos == -1 || pos < nextClausePos) {
+				nextClausePos = pos
+			}
+		}
+
+		if nextClausePos == -1 {
+			m.query = m.query[:offsetPos] + fmt.Sprintf("OFFSET %s", newOffset)
+			return
+		} else {
+			m.query = m.query[:offsetPos] + fmt.Sprintf("OFFSET %s ", newOffset) + m.query[nextClausePos:]
+			return
+		}
+	}
+}
+
 // Build returns the modified SQL query
 func (m *SQLModifier) Build() (string, error) {
 

@@ -19,14 +19,33 @@ func newBuilder(ks *Kuysor) *builder {
 func (b *builder) build() (string, error) {
 
 	var (
-		uPaging *uPaging = b.ks.uTabling.uPaging
+		// uPaging *uPaging = b.ks.uTabling.uPaging
+		vCursor *vCursor = b.ks.vTabling.vCursor
+		vOffset *vOffset = b.ks.vTabling.vOffset
 		vSorts  *vSorts  = b.ks.vTabling.vSorts
 	)
 
 	b.sqlMod = modifier.NewSQLModifier(b.ks.sql)
 
-	if uPaging != nil {
-		err := b.handlePagination()
+	// if uPaging != nil {
+	// 	err := b.handlePagination()
+	// 	if err != nil {
+	// 		return "", err
+	// 	}
+	// } else if vSorts != nil {
+	// 	err := b.applySorts(vSorts)
+	// 	if err != nil {
+	// 		return "", err
+	// 	}
+	// }
+
+	if vCursor != nil {
+		err := b.handlePaginationCursor()
+		if err != nil {
+			return "", err
+		}
+	} else if vOffset != nil {
+		err := b.handlePaginationOffset()
 		if err != nil {
 			return "", err
 		}
@@ -61,9 +80,25 @@ func (b *builder) sanitizeQuery(query string) string {
 // handlePagination handles the pagination.
 func (b *builder) handlePagination() (err error) {
 
+	if b.ks.uTabling.uPaging.PaginationType == Cursor {
+		return b.handlePaginationCursor()
+	} else if b.ks.uTabling.uPaging.PaginationType == Offset {
+		return b.handlePaginationOffset()
+	}
+
+	return fmt.Errorf("unsupported pagination type: %s", b.ks.uTabling.uPaging.PaginationType)
+
+}
+
+func (b *builder) handlePaginationCursor() (err error) {
+
+	var (
+		vCursor = b.ks.vTabling.vCursor
+	)
+
 	// if cursor is not empty, it means it is not the first page
 	// so we need to apply where clause
-	if b.ks.vTabling.vCursor != nil {
+	if vCursor != nil && vCursor.cursor != "" {
 		err = b.applyWhere()
 		if err != nil {
 			return err
@@ -72,6 +107,39 @@ func (b *builder) handlePagination() (err error) {
 
 	// apply limit and sorts
 	return b.applyLimitAndSorts()
+
+}
+
+func (b *builder) handlePaginationOffset() (err error) {
+
+	var (
+		vOffset = b.ks.vTabling.vOffset
+		vSorts  = b.ks.vTabling.vSorts
+	)
+
+	err = b.applyLimit()
+	if err != nil {
+		return err
+	}
+
+	// if offset is not set, it means it is not the first page
+	// so we need to apply where clause
+	if vOffset != nil {
+
+		err = b.applyOffset()
+		if err != nil {
+			return err
+		}
+	}
+
+	if vSorts != nil {
+		err = b.applySorts(vSorts)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
 
 }
 
@@ -246,6 +314,34 @@ func (b *builder) constructIsExpr(vSort *vSort, condition string) (expr modifier
 
 	expr = modifier.NewCondition(fmt.Sprintf("%s IS %s", vSort.column, condition))
 	return expr, nil
+
+}
+
+func (b *builder) applyOffset() error {
+
+	var (
+		offset = b.ks.uTabling.uPaging.Offset
+	)
+
+	b.sqlMod.SetOffset(defaultInternalPlaceHolder)
+
+	b.ks.vArgs = append(b.ks.vArgs, offset)
+
+	return nil
+
+}
+
+func (b *builder) applyLimit() error {
+
+	var (
+		limit = b.ks.uTabling.uPaging.Limit
+	)
+
+	b.sqlMod.SetLimit(defaultInternalPlaceHolder)
+
+	b.ks.vArgs = append(b.ks.vArgs, limit)
+
+	return nil
 
 }
 

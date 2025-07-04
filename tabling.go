@@ -7,5 +7,6 @@ type uTabling struct {
 
 type vTabling struct {
 	vCursor *vCursor
+	vOffset *vOffset
 	vSorts  *vSorts
 }
