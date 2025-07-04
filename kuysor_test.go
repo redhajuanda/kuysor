@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func TestCursorFirstPage(t *testing.T) {
+func TestCursorFirstPageQuestion(t *testing.T) {
 	var testCases = []struct {
 		in        string
 		out       string
@@ -66,6 +66,97 @@ func TestCursorFirstPage(t *testing.T) {
 
 	for _, tc := range testCases {
 		p := NewQuery(tc.in, Cursor)
+		p.WithOrderBy(tc.orderBy...).WithLimit(10).WithCursor("")
+		if len(tc.paramsIn) > 0 {
+			p.WithArgs(tc.paramsIn...)
+		}
+		res, err := p.Build()
+		if err != nil {
+			t.Error(err)
+		}
+
+		expected := strings.ToLower(tc.out)
+		got := strings.ToLower(res.Query)
+		if got != expected {
+			t.Errorf("Expected %s, got %s", expected, got)
+		}
+
+		if len(res.Args) != len(tc.paramsOut) {
+			t.Errorf("Expected %d params, got %d", len(tc.paramsOut), len(res.Args))
+		}
+		for i, v := range res.Args {
+			if v != tc.paramsOut[i] {
+				t.Errorf("Expected %v, got %v", tc.paramsOut[i], v)
+			}
+		}
+	}
+}
+
+func TestCursorFirstPageColon(t *testing.T) {
+	var testCases = []struct {
+		in        string
+		out       string
+		orderBy   []string
+		paramsIn  []any
+		paramsOut []any
+	}{
+		{
+			in:        "SELECT * FROM `table`",
+			orderBy:   []string{"-id"},
+			out:       "SELECT * FROM `table` ORDER BY id DESC LIMIT :1",
+			paramsOut: []any{11},
+		},
+		{
+			in:        "SELECT * FROM `table`",
+			orderBy:   []string{"-code", "-id"},
+			out:       "SELECT * FROM `table` ORDER BY code DESC, id DESC LIMIT :1",
+			paramsOut: []any{11},
+		},
+		{
+			in:        "SELECT * FROM `table`",
+			orderBy:   []string{"code", "+id"},
+			out:       "SELECT * FROM `table` ORDER BY code ASC, id ASC LIMIT :1",
+			paramsOut: []any{11},
+		},
+		{
+			in:        "SELECT * FROM `table`",
+			orderBy:   []string{"code", "-id"},
+			out:       "SELECT * FROM `table` ORDER BY code ASC, id DESC LIMIT :1",
+			paramsOut: []any{11},
+		},
+		{
+			in:        "SELECT * FROM `table` as t",
+			orderBy:   []string{"t.code", "-t.id"},
+			out:       "SELECT * FROM `table` as t ORDER BY t.code ASC, t.id DESC LIMIT :1",
+			paramsOut: []any{11},
+		},
+		{
+			in:        "SELECT * FROM `table` as t",
+			orderBy:   []string{"t.code", "-t.id", "t.name"},
+			out:       "SELECT * FROM `table` as t ORDER BY t.code ASC, t.id DESC, t.name ASC LIMIT :1",
+			paramsOut: []any{11},
+		},
+		{
+			in:        "SELECT * FROM `table` as t WHERE t.id = :1",
+			orderBy:   []string{"t.code", "-t.id", "t.name"},
+			out:       "SELECT * FROM `table` as t WHERE t.id = :1 ORDER BY t.code ASC, t.id DESC, t.name ASC LIMIT :2",
+			paramsIn:  []any{1},
+			paramsOut: []any{1, 11},
+		},
+		{
+			in:        "SELECT * FROM `table` as t GROUP BY t.id",
+			orderBy:   []string{"t.code", "-t.id", "t.name"},
+			out:       "SELECT * FROM `table` as t GROUP BY t.id ORDER BY t.code ASC, t.id DESC, t.name ASC LIMIT :1",
+			paramsOut: []any{11},
+		},
+	}
+
+	for _, tc := range testCases {
+
+		i := NewInstance(Options{
+			PlaceHolderType: Colon,
+		})
+		p := i.NewQuery(tc.in, Cursor)
 		p.WithOrderBy(tc.orderBy...).WithLimit(10).WithCursor("")
 		if len(tc.paramsIn) > 0 {
 			p.WithArgs(tc.paramsIn...)

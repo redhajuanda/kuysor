@@ -23,13 +23,21 @@ func NewInstance(opt ...Options) *Instance {
 
 // NewQuery creates a new Kuysor instance.
 // It accepts the SQL query.
-func (i *Instance) NewQuery(query string) *Kuysor {
+func (i *Instance) NewQuery(query string, paginationType PaginationType) *Kuysor {
 
 	p := &Kuysor{
 		sql: query,
 	}
 
 	p.options = i.options
+
+	if paginationType != "" {
+		p.uTabling = &uTabling{
+			uPaging: &uPaging{
+				PaginationType: paginationType,
+			},
+		}
+	}
 
 	return p
 
