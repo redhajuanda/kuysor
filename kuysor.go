@@ -26,6 +26,8 @@ const (
 // It accepts the SQL query.
 func NewQuery(query string, paginationType PaginationType) *Kuysor {
 
+	fmt.Println("==> creating new query...")
+
 	p := &Kuysor{
 		sql: query,
 	}

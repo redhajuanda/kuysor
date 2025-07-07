@@ -90,7 +90,7 @@ func (r *Result) SanitizeMap(data *[]map[string]interface{}) (next string, prev 
 
 // SanitizeStruct handles struct data for the cursor pagination.
 // It returns the next and previous cursor.
-func (r *Result) SanitizeStruct(data interface{}) (next string, prev string, err error) {
+func (r *Result) SanitizeStruct(data any) (next string, prev string, err error) {
 
 	if r.ks.uTabling == nil {
 		return next, prev, errors.New("uTabling is nil")
@@ -113,14 +113,14 @@ func (r *Result) SanitizeStruct(data interface{}) (next string, prev string, err
 		vSorts           = r.ks.vTabling.vSorts
 		limit            = r.ks.uTabling.uPaging.Limit
 		vcursor          = r.ks.vTabling.vCursor
-		isFirstPage      = vcursor == nil
+		isFirstPage      = vcursor.cursor == ""
 		cursorPrev       = vCursor{
 			Prefix: cursorPrefixPrev,
-			Cols:   make(map[string]interface{}),
+			Cols:   make(map[string]any),
 		}
 		cursorNext = vCursor{
 			Prefix: cursorPrefixNext,
-			Cols:   make(map[string]interface{}),
+			Cols:   make(map[string]any),
 		}
 	)
 
@@ -175,6 +175,8 @@ func (r *Result) generateCursor(totalData int, limit int, isFirstPage bool, vcur
 	var (
 		next, prev string
 	)
+
+	fmt.Println("totalData:", totalData, "limit:", limit, "isFirstPage:", isFirstPage, "vcursor_prefix:", vcursor.Prefix)
 
 	if (totalData > limit) || (vcursor.Prefix.isPrev() && totalData <= limit) {
 		nextB64, err := cursorNext.generateCursorBase64()
