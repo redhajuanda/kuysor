@@ -57,6 +57,91 @@ func (m *SQLModifier) findMainClausePosition(clauseKeyword string) int {
 	return -1
 }
 
+// findMainSelectPosition finds the position of the main SELECT clause (not in subqueries/CTEs)
+func (m *SQLModifier) findMainSelectPosition() int {
+	queryUpper := strings.ToUpper(m.query)
+
+	// Find all SELECT positions
+	re := regexp.MustCompile(`\bSELECT\b`)
+	matches := re.FindAllStringIndex(queryUpper, -1)
+
+	for _, match := range matches {
+		pos := match[0]
+
+		// Check if this position is inside parentheses
+		queryBefore := m.query[:pos]
+		openCount := strings.Count(queryBefore, "(")
+		closeCount := strings.Count(queryBefore, ")")
+
+		// If open and close counts match, it's not in parentheses (subquery)
+		if openCount == closeCount {
+			// Check if it's after WITH clause (main query after CTE)
+			withPos := strings.LastIndex(strings.ToUpper(queryBefore), "WITH")
+			if withPos != -1 {
+				// Check if there's a closing parenthesis after WITH but before this SELECT
+				// This would indicate the end of CTE definitions
+				afterWith := queryBefore[withPos:]
+				if strings.Contains(afterWith, ")") {
+					return pos
+				}
+			} else {
+				// No WITH clause, this is the main SELECT
+				return pos
+			}
+		}
+	}
+
+	return -1
+}
+
+// ConvertToCount converts the SELECT query to a COUNT query
+// Replaces the SELECT columns with COUNT(*) as total_data while preserving all other clauses
+func (m *SQLModifier) ConvertToCount() error {
+	queryUpper := strings.ToUpper(m.query)
+
+	// Check if it's a SELECT query
+	if !strings.HasPrefix(queryUpper, "SELECT") {
+		return fmt.Errorf("query must start with SELECT")
+	}
+
+	// Find the main SELECT position (not in subqueries)
+	selectPos := m.findMainSelectPosition()
+	if selectPos == -1 {
+		return fmt.Errorf("could not find main SELECT clause")
+	}
+
+	// Find the FROM clause position
+	fromPos := m.findMainClausePosition("FROM")
+	if fromPos == -1 {
+		return fmt.Errorf("query must contain a FROM clause")
+	}
+
+	// Handle WITH clause (CTE) if present
+	withPos := m.findMainClausePosition("WITH")
+	var withClause string
+	if withPos != -1 && withPos < selectPos {
+		// Extract the WITH clause up to the main SELECT
+		withClause = strings.TrimSpace(m.query[withPos:selectPos])
+		if !strings.HasSuffix(withClause, " ") {
+			withClause += " "
+		}
+	}
+
+	// Extract everything from FROM onwards (including JOINs, WHERE, etc.)
+	fromClause := strings.TrimSpace(m.query[fromPos:])
+
+	// Build the new query
+	var newQuery string
+	if withClause != "" {
+		newQuery = fmt.Sprintf("%sSELECT COUNT(*) AS total_data %s", withClause, fromClause)
+	} else {
+		newQuery = fmt.Sprintf("SELECT COUNT(*) AS total_data %s", fromClause)
+	}
+
+	m.query = newQuery
+	return nil
+}
+
 // AppendWhere appends a condition to the main WHERE clause
 // or adds a WHERE clause if none exists
 func (m *SQLModifier) AppendWhere(condition string) {

@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+
+	"github.com/redhajuanda/kuysor/modifier"
 )
 
 // Result represents the result of a query.
@@ -13,9 +15,28 @@ type Result struct {
 	ks    *Kuysor
 }
 
+// BuildCountQuery builds a count query from the original query.
+func BuildCountQuery(query string) (string, error) {
+
+	s := modifier.NewSQLModifier(query)
+
+	err := s.ConvertToCount()
+	if err != nil {
+		return "", fmt.Errorf("failed to convert to count query: %v", err)
+	}
+
+	count, err := s.Build()
+	if err != nil {
+		return "", fmt.Errorf("failed to build count query: %v", err)
+	}
+
+	return count, nil
+
+}
+
 // SanitizeMap handles the map data for the cursor pagination.
 // It returns the next and previous cursor.
-func (r *Result) SanitizeMap(data *[]map[string]interface{}) (next string, prev string, err error) {
+func (r *Result) SanitizeMap(data *[]map[string]any) (next string, prev string, err error) {
 
 	if r.ks.uTabling == nil {
 		return next, prev, errors.New("uTabling is nil")
@@ -34,11 +55,11 @@ func (r *Result) SanitizeMap(data *[]map[string]interface{}) (next string, prev 
 		isFirstPage      = vcursor == nil
 		cursorPrev       = vCursor{
 			Prefix: cursorPrefixPrev,
-			Cols:   make(map[string]interface{}),
+			Cols:   make(map[string]any),
 		}
 		cursorNext = vCursor{
 			Prefix: cursorPrefixNext,
-			Cols:   make(map[string]interface{}),
+			Cols:   make(map[string]any),
 		}
 	)
 
@@ -175,8 +196,6 @@ func (r *Result) generateCursor(totalData int, limit int, isFirstPage bool, vcur
 	var (
 		next, prev string
 	)
-
-	fmt.Println("totalData:", totalData, "limit:", limit, "isFirstPage:", isFirstPage, "vcursor_prefix:", vcursor.Prefix)
 
 	if (totalData > limit) || (vcursor.Prefix.isPrev() && totalData <= limit) {
 		nextB64, err := cursorNext.generateCursorBase64()

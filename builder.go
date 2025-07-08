@@ -61,8 +61,6 @@ func (b *builder) build() (string, error) {
 		return "", err
 	}
 
-	// fmt.Println("==> un-sanitized query =>", res)
-
 	return b.sanitizeQuery(res), nil
 }
 

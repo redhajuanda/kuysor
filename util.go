@@ -6,14 +6,14 @@ import (
 )
 
 // Function to reverse a slice of maps
-func reverse(data *[]map[string]interface{}) {
+func reverse(data *[]map[string]any) {
 	for i, j := 0, len(*data)-1; i < j; i, j = i+1, j-1 {
 		(*data)[i], (*data)[j] = (*data)[j], (*data)[i]
 	}
 }
 
 // Function to delete an element at index from a slice
-func deleteElement(s *[]map[string]interface{}, index int) {
+func deleteElement(s *[]map[string]any, index int) {
 	if index < 0 || index >= len(*s) {
 		panic("index out of range")
 	}
@@ -39,7 +39,9 @@ func base64Decode(s string) (string, error) {
 }
 
 // getFieldValueByTag gets a field value from a struct using the tag key
-func getFieldValueByTag(item reflect.Value, columnName string, tagKey string) interface{} {
+// now supports embedded structs
+func getFieldValueByTag(item reflect.Value, columnName string, tagKey string) any {
+
 	// Get the type of the struct
 	itemType := item.Type()
 	if item.Kind() == reflect.Ptr {
@@ -50,8 +52,26 @@ func getFieldValueByTag(item reflect.Value, columnName string, tagKey string) in
 	// Iterate through fields to find matching tag
 	for i := 0; i < itemType.NumField(); i++ {
 		field := itemType.Field(i)
+		fieldValue := item.Field(i)
+
+		// Check if current field has the matching tag
 		if tag := field.Tag.Get(tagKey); tag == columnName {
-			return item.Field(i).Interface()
+			return fieldValue.Interface()
+		}
+
+		// Check if this is an embedded struct (anonymous field)
+		if field.Anonymous && fieldValue.Kind() == reflect.Struct {
+			// Recursively search in the embedded struct
+			if result := getFieldValueByTag(fieldValue, columnName, tagKey); result != nil {
+				return result
+			}
+		}
+
+		// Also handle embedded pointer to struct
+		if field.Anonymous && fieldValue.Kind() == reflect.Ptr && !fieldValue.IsNil() && fieldValue.Elem().Kind() == reflect.Struct {
+			if result := getFieldValueByTag(fieldValue.Elem(), columnName, tagKey); result != nil {
+				return result
+			}
 		}
 	}
 	return nil
