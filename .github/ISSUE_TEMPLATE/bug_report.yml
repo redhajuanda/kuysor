@@ -1,0 +1,116 @@
+name: Bug Report
+description: Report a bug to help us improve Kuysor
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to fill out this bug report! Please provide as much detail as possible.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: A clear and concise description of what the bug is.
+      placeholder: Describe what happened...
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to Reproduce
+      description: Steps to reproduce the behavior
+      placeholder: |
+        1. Create a query with '...'
+        2. Call method '...'
+        3. Execute the query
+        4. See error
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: A clear and concise description of what you expected to happen.
+      placeholder: What should have happened?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual Behavior
+      description: A clear and concise description of what actually happened.
+      placeholder: What actually happened?
+    validations:
+      required: true
+
+  - type: textarea
+    id: code_sample
+    attributes:
+      label: Code Sample
+      description: Please provide a minimal code sample that demonstrates the issue
+      render: go
+      placeholder: |
+        package main
+        
+        import "github.com/redhajuanda/kuysor"
+        
+        func main() {
+            // Your code here that reproduces the issue
+        }
+
+  - type: input
+    id: go_version
+    attributes:
+      label: Go Version
+      description: What version of Go are you using?
+      placeholder: "go version"
+    validations:
+      required: true
+
+  - type: input
+    id: kuysor_version
+    attributes:
+      label: Kuysor Version
+      description: What version of Kuysor are you using?
+      placeholder: "v1.0.0 or commit hash"
+    validations:
+      required: true
+
+  - type: input
+    id: database
+    attributes:
+      label: Database
+      description: What database are you using?
+      placeholder: "MySQL 8.0, PostgreSQL 15, SQLite, etc."
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating System
+      description: What operating system are you using?
+      placeholder: "macOS 13.0, Ubuntu 22.04, Windows 11, etc."
+
+  - type: textarea
+    id: additional_context
+    attributes:
+      label: Additional Context
+      description: Add any other context about the problem here, such as error messages, logs, or screenshots.
+      placeholder: Any additional information that might be helpful...
+
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: Checklist
+      description: Please confirm the following
+      options:
+        - label: I have searched existing issues to make sure this isn't a duplicate
+          required: true
+        - label: I have provided a minimal code sample that demonstrates the issue
+          required: true
+        - label: I have included the relevant version information
+          required: true 

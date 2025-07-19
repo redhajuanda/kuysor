@@ -1,2 +1,22 @@
 tester/
 example/
+
+# Coverage reports
+coverage.out
+coverage.html
+
+# Performance profiling
+*.prof
+baseline.txt
+current.txt
+*.bench
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db

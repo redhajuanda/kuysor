@@ -1,0 +1,13 @@
+# yaml-language-server: $schema=https://json.schemastore.org/github-issue-config.json
+
+blank_issues_enabled: false
+contact_links:
+  - name: "💬 Ask a Question"
+    url: "https://github.com/redhajuanda/kuysor/discussions"
+    about: "Ask questions and discuss ideas with the community"
+  - name: "📖 Documentation"
+    url: "https://github.com/redhajuanda/kuysor/blob/main/README.md"
+    about: "Check the documentation for usage examples and guides"
+  - name: "🤝 Contributing Guide"
+    url: "https://github.com/redhajuanda/kuysor/blob/main/CONTRIBUTING.md"
+    about: "Learn how to contribute to the project" 

@@ -23,7 +23,7 @@ func getGlobalOptions() *Options {
 	if options == nil {
 		options = &Options{
 			PlaceHolderType: Question,
-			DefaultLimit:    defaulLimit,
+			DefaultLimit:    defaultLimit,
 			StructTag:       defaultStructTag,
 			NullSortMethod:  defaultNullSortMethod,
 		}

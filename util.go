@@ -2,6 +2,7 @@ package kuysor
 
 import (
 	"encoding/base64"
+	"fmt"
 	"reflect"
 )
 
@@ -13,11 +14,12 @@ func reverse(data *[]map[string]any) {
 }
 
 // Function to delete an element at index from a slice
-func deleteElement(s *[]map[string]any, index int) {
+func deleteElement(s *[]map[string]any, index int) error {
 	if index < 0 || index >= len(*s) {
-		panic("index out of range")
+		return fmt.Errorf("index out of range: %d", index)
 	}
 	*s = append((*s)[:index], (*s)[index+1:]...)
+	return nil
 }
 
 // base64Encode encodes the string into base64.

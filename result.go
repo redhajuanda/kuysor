@@ -83,9 +83,13 @@ func (r *Result) SanitizeMap(data *[]map[string]any) (next string, prev string, 
 	if totalData > limit {
 		// remove extra element
 		if vcursor.Prefix.isNext() {
-			deleteElement(data, totalData-1)
+			if err := deleteElement(data, totalData-1); err != nil {
+				return next, prev, fmt.Errorf("failed to delete element: %v", err)
+			}
 		} else {
-			deleteElement(data, 0)
+			if err := deleteElement(data, 0); err != nil {
+				return next, prev, fmt.Errorf("failed to delete element: %v", err)
+			}
 		}
 
 		// update total data after delete
