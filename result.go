@@ -182,11 +182,16 @@ func (r *Result) SanitizeStruct(data any) (next string, prev string, err error) 
 		firstItem := sliceVal.Index(0)
 		lastItem := sliceVal.Index(totalDataUpdated - 1)
 
-		firstVal := getFieldValueByTag(firstItem, vSort.column, r.ks.options.StructTag)
-		lastVal := getFieldValueByTag(lastItem, vSort.column, r.ks.options.StructTag)
+		_, column, err := vSort.extractColumn()
+		if err != nil {
+			return next, prev, err
+		}
 
-		cursorPrev.Cols[vSort.column] = firstVal
-		cursorNext.Cols[vSort.column] = lastVal
+		firstVal := getFieldValueByTag(firstItem, column, r.ks.options.StructTag)
+		lastVal := getFieldValueByTag(lastItem, column, r.ks.options.StructTag)
+
+		cursorPrev.Cols[column] = firstVal
+		cursorNext.Cols[column] = lastVal
 	}
 
 	// generate cursor

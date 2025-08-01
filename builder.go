@@ -277,7 +277,12 @@ func (b *builder) getCursorValue(vSort *vSort) (col *string, err error) {
 		t       string = defaultInternalPlaceHolder
 	)
 
-	if vCursor.Cols[vSort.column] == nil {
+	_, column, err := vSort.extractColumn()
+	if err != nil {
+		return nil, err
+	}
+
+	if vCursor.Cols[column] == nil {
 		col = nil
 	} else {
 		col = &t
@@ -301,7 +306,12 @@ func (b *builder) constructCompExpr(vSort *vSort, operator string) (cnd modifier
 
 	cnd = modifier.NewCondition(fmt.Sprintf("%s %s %s", vSort.column, operator, *col))
 
-	b.ks.vArgs = append(b.ks.vArgs, vCursor.Cols[vSort.column])
+	_, column, err := vSort.extractColumn()
+	if err != nil {
+		return modifier.SQLCondition{}, err
+	}
+
+	b.ks.vArgs = append(b.ks.vArgs, vCursor.Cols[column])
 
 	return cnd, nil
 
