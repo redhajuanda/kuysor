@@ -18,6 +18,93 @@ func NewSQLModifier(query string) *SQLModifier {
 	}
 }
 
+// FindFirstMainClausePos finds the earliest position (byte index) of any clause keyword
+// in the MAIN query (top-level, depth==0), excluding occurrences inside WITH CTE bodies,
+// subqueries, parentheses, strings, and comments.
+// Returns -1 if none found.
+func (m *SQLModifier) findFirstMainClausePos(query string, clauses []string) int {
+	s := newClauseScanner(query)
+
+	// Find where the main statement starts (after optional WITH ... CTE list).
+	mainStart := s.findMainStart()
+
+	// Pre-tokenize clauses into word tokens (e.g. "FOR UPDATE" -> ["FOR","UPDATE"]).
+	type clauseTok struct {
+		raw    string
+		tokens []string
+	}
+	ctoks := make([]clauseTok, 0, len(clauses))
+	for _, c := range clauses {
+		cu := strings.ToUpper(strings.TrimSpace(c))
+		if cu == "" {
+			continue
+		}
+		ctoks = append(ctoks, clauseTok{
+			raw:    c,
+			tokens: splitClauseTokens(cu),
+		})
+	}
+
+	minPos := -1
+	i := mainStart
+	depth := 0
+
+	for i < len(s.q) {
+		i = s.skipSpaceAndComments(i)
+		if i >= len(s.q) {
+			break
+		}
+
+		// Handle quotes/strings: skip them entirely.
+		ch := s.q[i]
+		if ch == '\'' || ch == '"' || ch == '`' {
+			i = s.skipQuoted(i, ch)
+			continue
+		}
+
+		// Track parentheses depth for subqueries/expressions.
+		if ch == '(' {
+			depth++
+			i++
+			continue
+		}
+		if ch == ')' {
+			if depth > 0 {
+				depth--
+			}
+			i++
+			continue
+		}
+
+		// Only consider clauses at top level of MAIN query.
+		if depth != 0 {
+			i++
+			continue
+		}
+
+		// Try match any clause starting here (word boundary + multi-word support).
+		if isWordStart(s.q, i) {
+			for _, c := range ctoks {
+				if pos := s.matchClauseAt(i, c.tokens); pos != -1 {
+					if minPos == -1 || pos < minPos {
+						minPos = pos
+					}
+				}
+			}
+			// Advance one word to avoid O(n*m) worst case too painful on long strings
+			_, _, next := s.readWord(i)
+			if next > i {
+				i = next
+				continue
+			}
+		}
+
+		i++
+	}
+
+	return minPos
+}
+
 // findMainClausePosition finds the position of a main clause (not in subqueries/CTEs)
 // Returns the position of the clause keyword, or -1 if not found
 func (m *SQLModifier) findMainClausePosition(clauseKeyword string) int {
@@ -222,17 +309,10 @@ func (m *SQLModifier) SetOrderBy(orderBy ...string) {
 	if orderByPos == -1 {
 		// No ORDER BY clause found, add one before LIMIT, OFFSET, FETCH, FOR UPDATE, etc.
 		clauses := []string{"LIMIT", "OFFSET", "FETCH", "FOR UPDATE", "FOR SHARE", "LOCK IN SHARE MODE", "INTO"}
-		minPos := -1
+		clausePos := m.findFirstMainClausePos(m.query, clauses)
 
-		for _, clause := range clauses {
-			clausePos := m.findMainClausePosition(clause)
-			if clausePos != -1 && (minPos == -1 || clausePos < minPos) {
-				minPos = clausePos
-			}
-		}
-
-		if minPos != -1 {
-			m.query = strings.TrimSpace(m.query[:minPos]) + fmt.Sprintf(" ORDER BY %s ", newOrderBy) + m.query[minPos:]
+		if clausePos != -1 {
+			m.query = strings.TrimSpace(m.query[:clausePos]) + fmt.Sprintf(" ORDER BY %s ", newOrderBy) + m.query[clausePos:]
 			return
 		}
 
