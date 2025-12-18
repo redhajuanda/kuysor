@@ -28,8 +28,19 @@ func (m *SQLModifier) findMainClausePosition(clauseKeyword string) int {
 	re := regexp.MustCompile(`\b` + clauseKeywordUpper + `\b`)
 	matches := re.FindAllStringIndex(queryUpper, -1)
 
+	// For queries with WITH (CTE), find the main SELECT position first
+	mainSelectPos := -1
+	if strings.Contains(queryUpper, "WITH") {
+		mainSelectPos = m.findMainSelectPosition()
+	}
+
 	for _, match := range matches {
 		pos := match[0]
+
+		// If we have a CTE and this clause is before the main SELECT, skip it
+		if mainSelectPos != -1 && pos < mainSelectPos {
+			continue
+		}
 
 		// Check if this position is inside parentheses
 		// Count open and close parentheses before this position
@@ -39,17 +50,6 @@ func (m *SQLModifier) findMainClausePosition(clauseKeyword string) int {
 
 		// If open and close counts match, it's not in parentheses
 		if openCount == closeCount {
-			// Additional check to avoid matching in WITH clauses or subqueries
-			queryBeforeClause := queryUpper[:pos]
-
-			// Skip if it's inside a CTE definition
-			if strings.Contains(queryBeforeClause, "WITH") {
-				cteAsCount := strings.Count(queryBeforeClause, " AS ")
-				if cteAsCount > 0 && openCount < cteAsCount {
-					continue
-				}
-			}
-
 			return pos
 		}
 	}
