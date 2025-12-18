@@ -358,3 +358,198 @@ func TestSQLModifier(t *testing.T) {
 	}
 
 }
+
+func TestSQLModifier_findFirstMainClausePos(t *testing.T) {
+	clauses := []string{
+		"LIMIT",
+		"OFFSET",
+		"FETCH",
+		"FOR UPDATE",
+		"FOR SHARE",
+		"LOCK IN SHARE MODE",
+		"INTO",
+	}
+
+	type tc struct {
+		name     string
+		query    string
+		wantPos  int    // -1 if none
+		wantText string // if wantPos != -1, query[wantPos:] must start with this exact substring (case-sensitive)
+	}
+
+	mustIndex := func(q, sub string) int {
+		pos := strings.Index(q, sub)
+		if pos == -1 {
+			panic("test bug: expected substring not found: " + sub)
+		}
+		return pos
+	}
+
+	tests := []tc{
+		{
+			name:     "Positive: main LIMIT only (simple)",
+			query:    "SELECT * FROM t WHERE a=1 LIMIT ?",
+			wantPos:  mustIndex("SELECT * FROM t WHERE a=1 LIMIT ?", "LIMIT ?"),
+			wantText: "LIMIT ?",
+		},
+		{
+			name:     "Positive: main OFFSET without LIMIT",
+			query:    "SELECT * FROM t ORDER BY id OFFSET 10",
+			wantPos:  mustIndex("SELECT * FROM t ORDER BY id OFFSET 10", "OFFSET 10"),
+			wantText: "OFFSET 10",
+		},
+		{
+			name:     "Positive: main LIMIT and OFFSET -> earliest is LIMIT",
+			query:    "SELECT * FROM t ORDER BY id LIMIT 5 OFFSET 10",
+			wantPos:  mustIndex("SELECT * FROM t ORDER BY id LIMIT 5 OFFSET 10", "LIMIT 5"),
+			wantText: "LIMIT 5",
+		},
+		{
+			name:     "Positive: main FOR UPDATE (multi-word clause)",
+			query:    "SELECT * FROM t WHERE a=1 FOR UPDATE",
+			wantPos:  mustIndex("SELECT * FROM t WHERE a=1 FOR UPDATE", "FOR UPDATE"),
+			wantText: "FOR UPDATE",
+		},
+		{
+			name:     "Positive: main LOCK IN SHARE MODE (multi-word clause)",
+			query:    "SELECT * FROM t LOCK IN SHARE MODE",
+			wantPos:  mustIndex("SELECT * FROM t LOCK IN SHARE MODE", "LOCK IN SHARE MODE"),
+			wantText: "LOCK IN SHARE MODE",
+		},
+
+		// --- WITH/CTE scenarios ---
+		{
+			name: "Positive: WITH + main LIMIT (CTE has no LIMIT)",
+			query: `WITH cte AS (
+  SELECT object_instance, MAX(created_at) AS created_at
+  FROM activity_log
+  GROUP BY object_instance
+)
+SELECT * FROM cte WHERE x=1 LIMIT ?`,
+			wantPos: mustIndex(`WITH cte AS (
+  SELECT object_instance, MAX(created_at) AS created_at
+  FROM activity_log
+  GROUP BY object_instance
+)
+SELECT * FROM cte WHERE x=1 LIMIT ?`, "LIMIT ?"),
+			wantText: "LIMIT ?",
+		},
+		{
+			name: "Negative: WITH has LIMIT but main has none -> -1",
+			query: `WITH cte AS (
+  SELECT * FROM t LIMIT 10
+)
+SELECT * FROM cte WHERE a=1`,
+			wantPos: -1,
+		},
+		{
+			name: "Positive: WITH has LIMIT + main has LIMIT -> pick main LIMIT",
+			query: `WITH cte AS (
+  SELECT * FROM t ORDER BY id LIMIT 10
+)
+SELECT * FROM cte WHERE a=1 LIMIT ?`,
+			wantPos: mustIndex(`WITH cte AS (
+  SELECT * FROM t ORDER BY id LIMIT 10
+)
+SELECT * FROM cte WHERE a=1 LIMIT ?`, "LIMIT ?"),
+			wantText: "LIMIT ?",
+		},
+		{
+			name: "Positive: multi-CTE + main LIMIT",
+			query: `WITH a AS (SELECT 1),
+     b AS (SELECT * FROM t WHERE x IN (SELECT y FROM z LIMIT 1))
+SELECT * FROM b LIMIT 7`,
+			wantPos: mustIndex(`WITH a AS (SELECT 1),
+     b AS (SELECT * FROM t WHERE x IN (SELECT y FROM z LIMIT 1))
+SELECT * FROM b LIMIT 7`, "LIMIT 7"),
+			wantText: "LIMIT 7",
+		},
+
+		// --- Subquery scenarios ---
+		{
+			name: "Negative: LIMIT only in subquery -> -1",
+			query: `SELECT *
+FROM t
+WHERE id IN (SELECT id FROM u ORDER BY id LIMIT 3)`,
+			wantPos: -1,
+		},
+		{
+			name: "Positive: subquery LIMIT + main LIMIT -> pick main LIMIT",
+			query: `SELECT *
+FROM t
+WHERE id IN (SELECT id FROM u ORDER BY id LIMIT 3)
+LIMIT 9`,
+			wantPos: mustIndex(`SELECT *
+FROM t
+WHERE id IN (SELECT id FROM u ORDER BY id LIMIT 3)
+LIMIT 9`, "LIMIT 9"),
+			wantText: "LIMIT 9",
+		},
+
+		// --- Strings & comments ---
+		{
+			name:    "Negative: LIMIT inside string literal only -> -1",
+			query:   `SELECT 'LIMIT 10' AS txt FROM t WHERE a=1`,
+			wantPos: -1,
+		},
+		{
+			name:    "Negative: LIMIT in line comment only -> -1",
+			query:   "SELECT * FROM t -- LIMIT 10\nWHERE a=1",
+			wantPos: -1,
+		},
+		{
+			name:    "Negative: LIMIT in block comment only -> -1",
+			query:   "SELECT * FROM t /* LIMIT 10 */ WHERE a=1",
+			wantPos: -1,
+		},
+		{
+			name:     "Positive: main LIMIT, but LIMIT also appears in comment/string -> still find main LIMIT",
+			query:    "SELECT 'LIMIT 1' AS s FROM t /* LIMIT 2 */ WHERE a=1 LIMIT 5",
+			wantPos:  mustIndex("SELECT 'LIMIT 1' AS s FROM t /* LIMIT 2 */ WHERE a=1 LIMIT 5", "LIMIT 5"),
+			wantText: "LIMIT 5",
+		},
+
+		// --- Earliest clause selection ---
+		{
+			name:     "Positive: main has FOR UPDATE and LIMIT -> earliest depends on order in query (LIMIT earlier)",
+			query:    "SELECT * FROM t LIMIT 2 FOR UPDATE",
+			wantPos:  mustIndex("SELECT * FROM t LIMIT 2 FOR UPDATE", "LIMIT 2"),
+			wantText: "LIMIT 2",
+		},
+		{
+			name: "Positive: main has FOR UPDATE earlier than LIMIT -> minPos should be FOR UPDATE",
+			// NOTE: this SQL is weird ordering in MySQL (FOR UPDATE typically at end),
+			// but test is purely about finding earliest clause occurrence in main query string.
+			query:    "SELECT * FROM t FOR UPDATE LIMIT 2",
+			wantPos:  mustIndex("SELECT * FROM t FOR UPDATE LIMIT 2", "FOR UPDATE"),
+			wantText: "FOR UPDATE",
+		},
+
+		// --- No clauses at all ---
+		{
+			name:    "Negative: no tracked clauses -> -1",
+			query:   "SELECT * FROM t WHERE a=1 ORDER BY id",
+			wantPos: -1,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			sqlmod := NewSQLModifier(tt.query)
+			got := sqlmod.findFirstMainClausePos(tt.query, clauses)
+			if got != tt.wantPos {
+				t.Fatalf("FindFirstMainClausePos() pos = %d, want %d\nquery:\n%s", got, tt.wantPos, tt.query)
+			}
+			if tt.wantPos != -1 {
+				if tt.wantPos < 0 || tt.wantPos >= len(tt.query) {
+					t.Fatalf("returned pos out of range: %d (len=%d)", tt.wantPos, len(tt.query))
+				}
+				if !strings.HasPrefix(tt.query[tt.wantPos:], tt.wantText) {
+					t.Fatalf("query at pos does not start with %q\npos=%d gotPrefix=%q\nquery:\n%s",
+						tt.wantText, tt.wantPos, tt.query[tt.wantPos:][:min(len(tt.query)-tt.wantPos, 40)], tt.query)
+				}
+			}
+		})
+	}
+}
