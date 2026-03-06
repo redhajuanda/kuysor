@@ -218,6 +218,146 @@ Cursor pagination requires that the ordering is based on at least one unique col
 
 To avoid issues, always include the primary key as the last ordering column when defining your pagination rules. This ensures that even if your main sorting column contains duplicate values (including NULL), pagination remains stable.
 
+
+### Paginating Inside a CTE (`WithCTETarget`)
+
+Some queries use a CTE (Common Table Expression) to pre-filter rows, and the pagination clauses — cursor `WHERE` condition, `ORDER BY`, and `LIMIT` — must go **inside the CTE body** rather than the outer `SELECT`. This is common when:
+
+- The CTE performs expensive filtering and you want keyset pagination to operate on the pre-filtered set.
+- The main query joins the CTE to other tables, adds aggregations, or computes columns that should not interfere with the keyset `WHERE` condition.
+
+#### The Problem
+
+Without `WithCTETarget`, Kuysor places all modifications on the outermost `SELECT`. In a CTE-driven query this is wrong: the cursor `WHERE` clause refers to columns that only exist inside the CTE, and the `LIMIT` would apply after all joins/aggregations rather than before.
+
+```sql
+-- ❌ Wrong: Kuysor would add WHERE / ORDER BY / LIMIT here, on the outer SELECT
+WITH filtered_ticket AS (
+    SELECT t.id
+    FROM ticket t
+    WHERE t.status = ?
+    -- ORDER BY and LIMIT should be here, but without WithCTETarget they won't be
+)
+SELECT t.id, t.code, ...
+FROM filtered_ticket ft
+JOIN ticket t ON t.id = ft.id
+GROUP BY t.id
+```
+
+#### The Solution
+
+Use `WithCTETarget("cte_name")` to tell Kuysor which CTE body to modify. Kuysor locates the named CTE (case-insensitive), routes the cursor `WHERE`, `ORDER BY`, and `LIMIT` inside it, and then mirrors the same `ORDER BY` on the main query so the final result set is returned in a consistent order.
+
+```go
+query := `
+    WITH filtered_ticket AS (
+        SELECT t.id
+        FROM ticket t
+        WHERE t.status = ?
+    )
+    SELECT t.id, t.code
+    FROM filtered_ticket ft
+    JOIN ticket t ON t.id = ft.id
+    GROUP BY t.id
+`
+
+// First page
+res, err := kuysor.
+    NewQuery(query, kuysor.Cursor).
+    WithCTETarget("filtered_ticket"). // ← route modifications into this CTE
+    WithOrderBy("-t.id").             // descending by t.id
+    WithLimit(10).
+    WithArgs("active").               // argument for WHERE t.status = ?
+    Build()
+```
+
+**Generated SQL — first page:**
+```sql
+WITH filtered_ticket AS (
+    SELECT t.id FROM ticket t
+    WHERE t.status = ?
+    ORDER BY t.id DESC   -- ← appended inside CTE body
+    LIMIT ?              -- ← appended inside CTE body (limit+1 = 11)
+)
+SELECT t.id, t.code
+FROM filtered_ticket ft JOIN ticket t ON t.id = ft.id
+GROUP BY t.id
+ORDER BY t.id DESC       -- ← mirrored on main query
+```
+```go
+Args: ["active", 11]
+```
+
+**Generated SQL — next page** (cursor passed via `WithCursor`):
+```sql
+WITH filtered_ticket AS (
+    SELECT t.id FROM ticket t
+    WHERE (t.status = ?) AND (t.id < ?)  -- ← cursor condition appended inside CTE
+    ORDER BY t.id DESC
+    LIMIT ?
+)
+SELECT t.id, t.code ...
+GROUP BY t.id
+ORDER BY t.id DESC
+```
+```go
+Args: ["active", "<last_id>", 11]
+```
+
+**Generated SQL — previous page** (prev cursor passed via `WithCursor`):
+```sql
+WITH filtered_ticket AS (
+    SELECT t.id FROM ticket t
+    WHERE (t.status = ?) AND (t.id > ?)  -- ← cursor condition appended inside CTE
+    ORDER BY t.id ASC   -- ← direction reversed for prev page, inside CTE
+    LIMIT ?
+)
+SELECT t.id, t.code ...
+GROUP BY t.id
+ORDER BY t.id ASC       -- ← reversed direction mirrored on main query
+```
+```go
+Args: ["active", "<first_id>", 11]
+```
+
+> **Note:** For previous-page queries the result set is automatically re-reversed by `SanitizeStruct` / `SanitizeMap`, so the caller always receives rows in the original sort order.
+
+#### Multiple CTEs
+
+If your query has several CTEs, `WithCTETarget` modifies **only the named one**; all other CTEs are left unchanged:
+
+```go
+query := `
+    WITH stats AS (
+        SELECT user_id, COUNT(*) AS total FROM orders GROUP BY user_id
+    ),
+    active_users AS (
+        SELECT u.id FROM users u WHERE u.status = ?
+    )
+    SELECT u.id, u.name, s.total
+    FROM active_users au
+    JOIN users u ON u.id = au.id
+    LEFT JOIN stats s ON s.user_id = u.id
+`
+
+res, err := kuysor.
+    NewQuery(query, kuysor.Cursor).
+    WithCTETarget("active_users"). // only active_users is modified; stats is untouched
+    WithOrderBy("u.id").
+    WithLimit(20).
+    WithArgs("active").
+    Build()
+```
+
+#### Constraints
+
+| Constraint | Behaviour |
+|---|---|
+| Query must contain a `WITH` clause | `Build()` returns an error if no CTE is present. |
+| CTE name must exist in the query | `Build()` returns an error if the name is not found (case-insensitive match). |
+| Sort columns must appear in the CTE's `SELECT` | Required for cursor generation — the same rule as standard cursor pagination. |
+| One nullable sort column maximum | Same limitation as standard cursor pagination. |
+
 ### Configuring Options 
 
 Kuysor provides flexible configuration / options to customize default behaviors, such as query placeholder types, default limits, struct tags, and null sorting methods. These settings can be applied globally, per instance, or at the query level to accommodate various needs.

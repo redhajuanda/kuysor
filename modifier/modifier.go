@@ -8,7 +8,8 @@ import (
 
 // SQLModifier handles parsing and modifying SQL queries
 type SQLModifier struct {
-	query string
+	query     string
+	cteTarget string // when set, modifications target this named CTE's body
 }
 
 // NewSQLModifier creates a new SQLModifier instance
@@ -16,6 +17,68 @@ func NewSQLModifier(query string) *SQLModifier {
 	return &SQLModifier{
 		query: strings.TrimSpace(query),
 	}
+}
+
+// SetCTETarget configures the modifier to apply WHERE / ORDER BY / LIMIT
+// modifications inside the named CTE's body instead of the main query.
+func (m *SQLModifier) SetCTETarget(name string) {
+	m.cteTarget = name
+}
+
+// findCTEBodyBounds returns the start and end byte positions of the content
+// inside the named CTE's outer parentheses.
+// e.g. for "WITH foo AS ( SELECT id FROM t WHERE x=1 )", it returns the
+// positions of " SELECT id FROM t WHERE x=1 " (exclusive of the parens).
+// Returns (-1, -1, err) when the CTE is not found or parens are unmatched.
+func (m *SQLModifier) findCTEBodyBounds(cteName string) (start, end int, err error) {
+	queryUpper := strings.ToUpper(m.query)
+	cteNameUpper := regexp.QuoteMeta(strings.ToUpper(cteName))
+
+	// Match: <cteName> followed by optional whitespace, AS, optional whitespace, then (
+	re := regexp.MustCompile(`\b` + cteNameUpper + `\s+AS\s*\(`)
+	loc := re.FindStringIndex(queryUpper)
+	if loc == nil {
+		return -1, -1, fmt.Errorf("CTE %q not found in query", cteName)
+	}
+
+	// loc[1] points just past the '(' in "AS ("
+	openParenPos := loc[1] - 1 // position of the '('
+	start = openParenPos + 1   // content begins after '('
+
+	// Walk forward tracking depth to find the matching closing ')'
+	depth := 1
+	i := start
+	for i < len(m.query) {
+		switch m.query[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				end = i
+				return start, end, nil
+			}
+		}
+		i++
+	}
+
+	return -1, -1, fmt.Errorf("unmatched parentheses for CTE %q", cteName)
+}
+
+// applyToCTEBody extracts the named CTE's body, applies fn to a sub-modifier
+// of that body, then splices the modified body back into the full query.
+func (m *SQLModifier) applyToCTEBody(fn func(sub *SQLModifier)) error {
+	start, end, err := m.findCTEBodyBounds(m.cteTarget)
+	if err != nil {
+		return err
+	}
+
+	sub := &SQLModifier{query: strings.TrimSpace(m.query[start:end])}
+	fn(sub)
+
+	// splice the modified body back (preserve surrounding whitespace layout)
+	m.query = m.query[:start] + sub.query + m.query[end:]
+	return nil
 }
 
 // findMainClausePosition finds the position of a main clause (not in subqueries/CTEs)
@@ -142,9 +205,21 @@ func (m *SQLModifier) ConvertToCount() error {
 	return nil
 }
 
-// AppendWhere appends a condition to the main WHERE clause
-// or adds a WHERE clause if none exists
-func (m *SQLModifier) AppendWhere(condition string) {
+// AppendWhere appends a condition to the WHERE clause.
+// When cteTarget is set it targets the CTE body; otherwise it targets the main query.
+// Returns an error only when cteTarget is set and the CTE cannot be found.
+func (m *SQLModifier) AppendWhere(condition string) error {
+	if m.cteTarget != "" {
+		return m.applyToCTEBody(func(sub *SQLModifier) {
+			sub.appendWhereInternal(condition)
+		})
+	}
+	m.appendWhereInternal(condition)
+	return nil
+}
+
+// appendWhereInternal performs the WHERE append on m.query without any CTE targeting.
+func (m *SQLModifier) appendWhereInternal(condition string) {
 	wherePos := m.findMainClausePosition("WHERE")
 
 	if wherePos == -1 {
@@ -189,7 +264,6 @@ func (m *SQLModifier) AppendWhere(condition string) {
 		}
 
 		// Check if the existing condition has multiple conditions (contains AND or OR operators)
-		// We use regular expressions to avoid matching these words inside string literals or identifiers
 		reMultipleConditions := regexp.MustCompile(`\b(AND|OR)\b`)
 		needsParentheses := reMultipleConditions.MatchString(existingCondition)
 
@@ -201,26 +275,43 @@ func (m *SQLModifier) AppendWhere(condition string) {
 		}
 
 		if nextClausePos == -1 {
-			// No next clause, replace to the end
 			m.query = m.query[:wherePos] + newWhere
 			return
 		} else {
-			// Replace until the next clause
 			m.query = m.query[:wherePos] + newWhere + " " + m.query[nextClausePos:]
 			return
 		}
 	}
 }
 
-// SetOrderBy sets the ORDER BY clause or adds one if none exists
-func (m *SQLModifier) SetOrderBy(orderBy ...string) {
-	// Join multiple order by clauses with commas
+// SetOrderBy sets the ORDER BY clause.
+// When cteTarget is set it targets the CTE body; otherwise it targets the main query.
+// Returns an error only when cteTarget is set and the CTE cannot be found.
+func (m *SQLModifier) SetOrderBy(orderBy ...string) error {
+	if m.cteTarget != "" {
+		return m.applyToCTEBody(func(sub *SQLModifier) {
+			sub.setOrderByInternal(orderBy...)
+		})
+	}
+	m.setOrderByInternal(orderBy...)
+	return nil
+}
+
+// SetMainOrderBy always sets the ORDER BY on the main query, regardless of cteTarget.
+// Used when WithCTETarget is active to mirror the effective sort order on the outer
+// SELECT so the joined result set is returned in the correct order.
+func (m *SQLModifier) SetMainOrderBy(orderBy ...string) error {
+	m.setOrderByInternal(orderBy...)
+	return nil
+}
+
+// setOrderByInternal performs the ORDER BY set on m.query without any CTE targeting.
+func (m *SQLModifier) setOrderByInternal(orderBy ...string) {
 	newOrderBy := strings.Join(orderBy, ", ")
 
 	orderByPos := m.findMainClausePosition("ORDER BY")
 
 	if orderByPos == -1 {
-		// No ORDER BY clause found, add one before LIMIT, OFFSET, FETCH, FOR UPDATE, etc.
 		clauses := []string{"LIMIT", "OFFSET", "FETCH", "FOR UPDATE", "FOR SHARE", "LOCK IN SHARE MODE", "INTO"}
 		minPos := -1
 
@@ -236,11 +327,9 @@ func (m *SQLModifier) SetOrderBy(orderBy ...string) {
 			return
 		}
 
-		// No other clauses found
 		m.query = m.query + fmt.Sprintf(" ORDER BY %s", newOrderBy)
 		return
 	} else {
-		// Find the end of the ORDER BY clause (next clause or end of query)
 		clauses := []string{"LIMIT", "OFFSET", "FETCH", "FOR UPDATE", "FOR SHARE", "LOCK IN SHARE MODE", "INTO"}
 		nextClausePos := -1
 
@@ -252,23 +341,33 @@ func (m *SQLModifier) SetOrderBy(orderBy ...string) {
 		}
 
 		if nextClausePos == -1 {
-			// No next clause, replace to the end
 			m.query = m.query[:orderByPos] + fmt.Sprintf("ORDER BY %s", newOrderBy)
 			return
 		} else {
-			// Replace until the next clause
 			m.query = m.query[:orderByPos] + fmt.Sprintf("ORDER BY %s ", newOrderBy) + m.query[nextClausePos:]
 			return
 		}
 	}
 }
 
-// SetLimit sets the LIMIT clause or adds one if none exists
-func (m *SQLModifier) SetLimit(newLimit string) {
+// SetLimit sets the LIMIT clause.
+// When cteTarget is set it targets the CTE body; otherwise it targets the main query.
+// Returns an error only when cteTarget is set and the CTE cannot be found.
+func (m *SQLModifier) SetLimit(newLimit string) error {
+	if m.cteTarget != "" {
+		return m.applyToCTEBody(func(sub *SQLModifier) {
+			sub.setLimitInternal(newLimit)
+		})
+	}
+	m.setLimitInternal(newLimit)
+	return nil
+}
+
+// setLimitInternal performs the LIMIT set on m.query without any CTE targeting.
+func (m *SQLModifier) setLimitInternal(newLimit string) {
 	limitPos := m.findMainClausePosition("LIMIT")
 
 	if limitPos == -1 {
-		// No LIMIT clause found, add before OFFSET, FETCH, FOR UPDATE, etc.
 		clauses := []string{"OFFSET", "FETCH", "FOR UPDATE", "FOR SHARE", "LOCK IN SHARE MODE", "INTO"}
 		minPos := -1
 
@@ -284,12 +383,9 @@ func (m *SQLModifier) SetLimit(newLimit string) {
 			return
 		}
 
-		// No other clauses found, add to the end
 		m.query = m.query + fmt.Sprintf(" LIMIT %s", newLimit)
 		return
 	} else {
-		// Replace the existing LIMIT clause
-		// First, find where the LIMIT clause ends (typically the end of the query or another clause)
 		clauses := []string{"OFFSET", "FETCH", "FOR UPDATE", "FOR SHARE", "LOCK IN SHARE MODE", "INTO"}
 		nextClausePos := -1
 
@@ -301,7 +397,6 @@ func (m *SQLModifier) SetLimit(newLimit string) {
 		}
 
 		if nextClausePos == -1 {
-			// No next clause, extract the current limit value using regex
 			queryAfterLimit := m.query[limitPos+5:] // +5 to skip "LIMIT"
 			re := regexp.MustCompile(`^\s*\d+(?:\s*,\s*\d+)?`)
 			match := re.FindStringIndex(queryAfterLimit)
@@ -311,23 +406,34 @@ func (m *SQLModifier) SetLimit(newLimit string) {
 				m.query = m.query[:limitPos] + fmt.Sprintf("LIMIT %s", newLimit) + m.query[limitEndPos:]
 				return
 			} else {
-				// Couldn't parse the current LIMIT value, just replace everything after LIMIT
 				m.query = m.query[:limitPos] + fmt.Sprintf("LIMIT %s", newLimit)
 				return
 			}
 		} else {
-			// Replace until the next clause
 			m.query = m.query[:limitPos] + fmt.Sprintf("LIMIT %s ", newLimit) + m.query[nextClausePos:]
 			return
 		}
 	}
 }
 
-func (m *SQLModifier) SetOffset(newOffset string) {
+// SetOffset sets the OFFSET clause.
+// When cteTarget is set it targets the CTE body; otherwise it targets the main query.
+// Returns an error only when cteTarget is set and the CTE cannot be found.
+func (m *SQLModifier) SetOffset(newOffset string) error {
+	if m.cteTarget != "" {
+		return m.applyToCTEBody(func(sub *SQLModifier) {
+			sub.setOffsetInternal(newOffset)
+		})
+	}
+	m.setOffsetInternal(newOffset)
+	return nil
+}
+
+// setOffsetInternal performs the OFFSET set on m.query without any CTE targeting.
+func (m *SQLModifier) setOffsetInternal(newOffset string) {
 	offsetPos := m.findMainClausePosition("OFFSET")
 
 	if offsetPos == -1 {
-		// No OFFSET clause found, add before FETCH, FOR UPDATE, etc.
 		clauses := []string{"FETCH", "FOR UPDATE", "FOR SHARE", "LOCK IN SHARE MODE", "INTO"}
 		minPos := -1
 
@@ -343,12 +449,9 @@ func (m *SQLModifier) SetOffset(newOffset string) {
 			return
 		}
 
-		// No other clauses found, add to the end
 		m.query = m.query + fmt.Sprintf(" OFFSET %s", newOffset)
 		return
 	} else {
-		// Replace the existing OFFSET clause
-		// First, find where the OFFSET clause ends (typically the end of the query or another clause)
 		clauses := []string{"FETCH", "FOR UPDATE", "FOR SHARE", "LOCK IN SHARE MODE", "INTO"}
 		nextClausePos := -1
 
@@ -369,7 +472,7 @@ func (m *SQLModifier) SetOffset(newOffset string) {
 	}
 }
 
-// Build returns the modified SQL query
+// Build returns the normalized SQL query
 func (m *SQLModifier) Build() (string, error) {
 
 	q, err := normalizeSQL(m.query)

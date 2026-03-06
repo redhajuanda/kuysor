@@ -419,3 +419,210 @@ func TestOffsetWithOrder(t *testing.T) {
 		}
 	}
 }
+
+// TestCTETargetFirstPage verifies that WithCTETarget routes ORDER BY and LIMIT
+// into the named CTE body and leaves the main query untouched.
+func TestCTETargetFirstPage(t *testing.T) {
+	query := `
+		WITH filtered_ticket AS (
+			SELECT t.id
+			FROM ticket t
+			WHERE t.deleted_at = 0
+			AND t.status = ?
+		)
+		SELECT t.id, t.code
+		FROM filtered_ticket ft
+		JOIN ticket t ON t.id = ft.id
+		GROUP BY t.id
+		ORDER BY t.id
+	`
+
+	res, err := NewQuery(query, Cursor).
+		WithCTETarget("filtered_ticket").
+		WithOrderBy("t.id").
+		WithLimit(10).
+		WithArgs("active").
+		Build()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	q := strings.ToLower(res.Query)
+
+	// ORDER BY and LIMIT must appear inside the CTE (before the closing ')' of the CTE)
+	// and also the main ORDER BY must remain
+	cteClose := strings.Index(q, ") select")
+	if cteClose == -1 {
+		t.Fatalf("could not find CTE closing in query: %s", q)
+	}
+
+	cteBody := q[:cteClose]
+	mainBody := q[cteClose:]
+
+	if !strings.Contains(cteBody, "order by t.id asc") {
+		t.Errorf("expected ORDER BY inside CTE body, got CTE body: %s", cteBody)
+	}
+	if !strings.Contains(cteBody, "limit ?") {
+		t.Errorf("expected LIMIT inside CTE body, got CTE body: %s", cteBody)
+	}
+	// main query ORDER BY must not be changed
+	if !strings.Contains(mainBody, "order by t.id") {
+		t.Errorf("expected original ORDER BY to remain in main query, got: %s", mainBody)
+	}
+
+	// args: user arg "active" first, then limit+1=11
+	expected := []any{"active", 11}
+	if len(res.Args) != len(expected) {
+		t.Fatalf("expected %d args, got %d: %v", len(expected), len(res.Args), res.Args)
+	}
+	for i, v := range expected {
+		if v != res.Args[i] {
+			t.Errorf("arg[%d]: expected %v, got %v", i, v, res.Args[i])
+		}
+	}
+}
+
+// TestCTETargetSecondPageNext verifies cursor WHERE is appended inside the CTE
+// and ORDER BY / LIMIT are also placed inside the CTE on the next page.
+func TestCTETargetSecondPageNext(t *testing.T) {
+	// cursor: {"prefix":"next","cols":{"id":"100"}}
+	cursor := base64Encode(`{"prefix":"next","cols":{"id":"100"}}`)
+
+	query := `
+		WITH filtered_ticket AS (
+			SELECT t.id FROM ticket t
+			WHERE t.deleted_at = 0 AND t.status = ?
+		)
+		SELECT t.id, t.code
+		FROM filtered_ticket ft
+		JOIN ticket t ON t.id = ft.id
+		GROUP BY t.id
+		ORDER BY t.id
+	`
+
+	res, err := NewQuery(query, Cursor).
+		WithCTETarget("filtered_ticket").
+		WithOrderBy("t.id").
+		WithLimit(10).
+		WithCursor(cursor).
+		WithArgs("active").
+		Build()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	q := strings.ToLower(res.Query)
+
+	cteClose := strings.Index(q, ") select")
+	if cteClose == -1 {
+		t.Fatalf("could not find CTE closing in query: %s", q)
+	}
+	cteBody := q[:cteClose]
+	mainBody := q[cteClose:]
+
+	// cursor WHERE must be inside the CTE
+	if !strings.Contains(cteBody, "t.id > ?") {
+		t.Errorf("expected cursor WHERE inside CTE body, got: %s", cteBody)
+	}
+	if !strings.Contains(cteBody, "order by t.id asc") {
+		t.Errorf("expected ORDER BY inside CTE body, got: %s", cteBody)
+	}
+	if !strings.Contains(cteBody, "limit ?") {
+		t.Errorf("expected LIMIT inside CTE body, got: %s", cteBody)
+	}
+
+	// main query ORDER BY must mirror the CTE sort direction (ASC)
+	if !strings.Contains(mainBody, "order by t.id asc") {
+		t.Errorf("expected ORDER BY t.id ASC in main query, got: %s", mainBody)
+	}
+
+	// args: "active" (user WHERE), then cursor value "100", then limit+1=11
+	expected := []any{"active", "100", 11}
+	if len(res.Args) != len(expected) {
+		t.Fatalf("expected %d args, got %d: %v", len(expected), len(res.Args), res.Args)
+	}
+	for i, v := range expected {
+		if v != res.Args[i] {
+			t.Errorf("arg[%d]: expected %v, got %v", i, v, res.Args[i])
+		}
+	}
+}
+
+// TestCTETargetSecondPagePrev verifies that the previous-page cursor reverses
+// ORDER BY inside the CTE body.
+func TestCTETargetSecondPagePrev(t *testing.T) {
+	// cursor: {"prefix":"prev","cols":{"id":"100"}}
+	cursor := base64Encode(`{"prefix":"prev","cols":{"id":"100"}}`)
+
+	query := `
+		WITH filtered_ticket AS (
+			SELECT t.id FROM ticket t
+			WHERE t.deleted_at = 0
+		)
+		SELECT t.id, t.code
+		FROM filtered_ticket ft
+		JOIN ticket t ON t.id = ft.id
+		ORDER BY t.id
+	`
+
+	res, err := NewQuery(query, Cursor).
+		WithCTETarget("filtered_ticket").
+		WithOrderBy("t.id").
+		WithLimit(10).
+		WithCursor(cursor).
+		Build()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	q := strings.ToLower(res.Query)
+
+	cteClose := strings.Index(q, ") select")
+	if cteClose == -1 {
+		t.Fatalf("could not find CTE closing in query: %s", q)
+	}
+	cteBody := q[:cteClose]
+	mainBody := q[cteClose:]
+
+	// prev page: ORDER BY must be reversed (DESC) inside CTE
+	if !strings.Contains(cteBody, "order by t.id desc") {
+		t.Errorf("expected reversed ORDER BY DESC inside CTE body, got: %s", cteBody)
+	}
+	// cursor WHERE uses < for ascending column going backwards
+	if !strings.Contains(cteBody, "t.id < ?") {
+		t.Errorf("expected cursor WHERE (t.id < ?) inside CTE body, got: %s", cteBody)
+	}
+
+	// main query ORDER BY must mirror the CTE reversed direction (DESC) so the
+	// final joined result set is returned in the same order as the CTE selected.
+	if !strings.Contains(mainBody, "order by t.id desc") {
+		t.Errorf("expected ORDER BY t.id DESC in main query to mirror CTE, got: %s", mainBody)
+	}
+}
+
+// TestCTETargetValidationNoCTE verifies WithCTETarget returns an error
+// when the query does not contain a WITH clause.
+func TestCTETargetValidationNoCTE(t *testing.T) {
+	_, err := NewQuery("SELECT id FROM ticket WHERE deleted_at = 0", Cursor).
+		WithCTETarget("filtered_ticket").
+		WithOrderBy("id").
+		WithLimit(10).
+		Build()
+	if err == nil {
+		t.Error("expected error for CTETarget on non-CTE query, got nil")
+	}
+}
+
+// TestCTETargetValidationCTENotFound verifies that an error is returned when
+// the specified CTE name does not exist in the query.
+func TestCTETargetValidationCTENotFound(t *testing.T) {
+	query := `WITH ft AS (SELECT id FROM ticket t) SELECT * FROM ft JOIN ticket t ON t.id = ft.id ORDER BY t.id`
+	_, err := NewQuery(query, Cursor).
+		WithCTETarget("nonexistent").
+		WithOrderBy("t.id").
+		WithLimit(10).
+		Build()
+	if err == nil {
+		t.Error("expected error for non-existent CTE name, got nil")
+	}
+}

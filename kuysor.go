@@ -1,9 +1,9 @@
 package kuysor
 
 import (
-	"fmt"
-
 	"errors"
+	"fmt"
+	"strings"
 )
 
 type Kuysor struct {
@@ -132,6 +132,26 @@ func (p *Kuysor) WithPlaceHolderType(placeHolderType PlaceHolderType) *Kuysor {
 
 }
 
+// WithCTETarget sets the name of the CTE whose body should receive the
+// WHERE, ORDER BY, and LIMIT modifications instead of the main query.
+// This is useful when pagination is intentionally performed inside a CTE
+// for performance (e.g. to limit rows before expensive JOINs in the main query).
+func (p *Kuysor) WithCTETarget(cteName string) *Kuysor {
+
+	if p.uTabling == nil {
+		p.uTabling = &uTabling{}
+	}
+
+	if p.uTabling.uPaging == nil {
+		p.uTabling.uPaging = &uPaging{}
+	}
+
+	p.uTabling.uPaging.CTETarget = cteName
+
+	return p
+
+}
+
 // WithNullSortMethod sets the null sort method for the query.
 // It is useful when you want to override the instance options or the global options.
 func (p *Kuysor) WithNullSortMethod(method NullSortMethod) *Kuysor {
@@ -163,6 +183,9 @@ func (p *Kuysor) build() (*Result, error) {
 	}
 	if uTabling.uPaging != nil && uTabling.uPaging.PaginationType == Cursor && uTabling.uSort == nil {
 		return result, errors.New("sort is required for cursor pagination")
+	}
+	if uTabling.uPaging != nil && uTabling.uPaging.CTETarget != "" && !strings.Contains(strings.ToUpper(p.sql), "WITH") {
+		return result, errors.New("CTETarget requires a query with a WITH clause")
 	}
 	if p.uArgs == nil {
 		p.uArgs = make([]any, 0)

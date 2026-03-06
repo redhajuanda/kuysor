@@ -334,16 +334,22 @@ func TestSQLModifier(t *testing.T) {
 		p := NewSQLModifier(tc.in)
 
 		// append where
-		p.AppendWhere(tc.where.Expression)
+		if err := p.AppendWhere(tc.where.Expression); err != nil {
+			t.Error(err)
+		}
 
 		// set order by
 		if len(tc.orderBy) > 0 {
-			p.SetOrderBy(tc.orderBy...)
+			if err := p.SetOrderBy(tc.orderBy...); err != nil {
+				t.Error(err)
+			}
 		}
 
 		// set limit
 		if tc.limit != "" {
-			p.SetLimit(tc.limit)
+			if err := p.SetLimit(tc.limit); err != nil {
+				t.Error(err)
+			}
 		}
 
 		// build the query
@@ -357,4 +363,203 @@ func TestSQLModifier(t *testing.T) {
 		}
 	}
 
+}
+
+func TestFindCTEBodyBounds(t *testing.T) {
+	testCases := []struct {
+		name      string
+		query     string
+		cteName   string
+		wantBody  string // expected content between the CTE parens
+		wantError bool
+	}{
+		{
+			name:     "single CTE",
+			query:    "WITH foo AS (SELECT id FROM t WHERE x = 1) SELECT * FROM foo",
+			cteName:  "foo",
+			wantBody: "SELECT id FROM t WHERE x = 1",
+		},
+		{
+			name:     "single CTE case-insensitive",
+			query:    "WITH Foo AS (SELECT id FROM t) SELECT * FROM Foo",
+			cteName:  "foo",
+			wantBody: "SELECT id FROM t",
+		},
+		{
+			name: "multiple CTEs - target first",
+			query: `WITH cte1 AS (SELECT id FROM t1),
+					cte2 AS (SELECT id FROM t2)
+					SELECT * FROM cte1 JOIN cte2 ON cte1.id = cte2.id`,
+			cteName:  "cte1",
+			wantBody: "SELECT id FROM t1",
+		},
+		{
+			name: "multiple CTEs - target second",
+			query: `WITH cte1 AS (SELECT id FROM t1),
+					cte2 AS (SELECT id FROM t2)
+					SELECT * FROM cte1 JOIN cte2 ON cte1.id = cte2.id`,
+			cteName:  "cte2",
+			wantBody: "SELECT id FROM t2",
+		},
+		{
+			name: "nested subquery inside CTE body",
+			query: `WITH filtered AS (
+						SELECT id FROM t
+						JOIN (SELECT max_id FROM meta) m ON m.max_id = t.id
+						WHERE t.status = 'active'
+					)
+					SELECT * FROM filtered`,
+			cteName: "filtered",
+			// wantBody is compared after normalizing whitespace
+			wantBody: "SELECT id FROM t JOIN (SELECT max_id FROM meta) m ON m.max_id = t.id WHERE t.status = 'active'",
+		},
+		{
+			name:      "CTE not found",
+			query:     "WITH foo AS (SELECT id FROM t) SELECT * FROM foo",
+			cteName:   "bar",
+			wantError: true,
+		},
+		{
+			name:      "no CTE at all",
+			query:     "SELECT * FROM t WHERE id = 1",
+			cteName:   "foo",
+			wantError: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewSQLModifier(tc.query)
+			start, end, err := m.findCTEBodyBounds(tc.cteName)
+			if tc.wantError {
+				if err == nil {
+					t.Errorf("expected error, got none")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			// normalize whitespace for comparison
+			normalizeWS := func(s string) string {
+				return strings.Join(strings.Fields(s), " ")
+			}
+			got := normalizeWS(tc.query[start:end])
+			want := normalizeWS(tc.wantBody)
+			if !strings.EqualFold(got, want) {
+				t.Errorf("body mismatch\nwant: %q\n got: %q", want, got)
+			}
+		})
+	}
+}
+
+func TestCTETargetModifier(t *testing.T) {
+	testCases := []struct {
+		name    string
+		query   string
+		cte     string
+		where   string
+		orderBy []string
+		limit   string
+		out     string
+	}{
+		{
+			name:    "append where into CTE body, no existing where in CTE",
+			query:   "WITH ft AS (SELECT id FROM ticket t) SELECT * FROM ft JOIN ticket t ON t.id = ft.id ORDER BY t.id",
+			cte:     "ft",
+			where:   "t.id > $0",
+			out:     "WITH ft AS (SELECT id FROM ticket t WHERE t.id > $0) SELECT * FROM ft JOIN ticket t ON t.id = ft.id ORDER BY t.id",
+		},
+		{
+			name:    "append where into CTE body with existing where",
+			query:   "WITH ft AS (SELECT id FROM ticket t WHERE t.deleted_at = 0) SELECT * FROM ft JOIN ticket t ON t.id = ft.id",
+			cte:     "ft",
+			where:   "(t.id > $0)",
+			out:     "WITH ft AS (SELECT id FROM ticket t WHERE t.deleted_at = 0 AND (t.id > $0)) SELECT * FROM ft JOIN ticket t ON t.id = ft.id",
+		},
+		{
+			name:    "set order by inside CTE body, main order by untouched",
+			query:   "WITH ft AS (SELECT id FROM ticket t WHERE t.deleted_at = 0) SELECT * FROM ft JOIN ticket t ON t.id = ft.id ORDER BY t.id",
+			cte:     "ft",
+			orderBy: []string{"t.id ASC"},
+			out:     "WITH ft AS (SELECT id FROM ticket t WHERE t.deleted_at = 0 ORDER BY t.id ASC) SELECT * FROM ft JOIN ticket t ON t.id = ft.id ORDER BY t.id",
+		},
+		{
+			name:    "set limit inside CTE body, no limit in main query",
+			query:   "WITH ft AS (SELECT id FROM ticket t WHERE t.deleted_at = 0) SELECT * FROM ft JOIN ticket t ON t.id = ft.id ORDER BY t.id",
+			cte:     "ft",
+			limit:   "$0",
+			out:     "WITH ft AS (SELECT id FROM ticket t WHERE t.deleted_at = 0 LIMIT $0) SELECT * FROM ft JOIN ticket t ON t.id = ft.id ORDER BY t.id",
+		},
+		{
+			name:    "set limit replaces existing limit inside CTE",
+			query:   "WITH ft AS (SELECT id FROM ticket t WHERE t.deleted_at = 0 ORDER BY t.id LIMIT 10) SELECT * FROM ft JOIN ticket t ON t.id = ft.id ORDER BY t.id",
+			cte:     "ft",
+			limit:   "$0",
+			out:     "WITH ft AS (SELECT id FROM ticket t WHERE t.deleted_at = 0 ORDER BY t.id LIMIT $0) SELECT * FROM ft JOIN ticket t ON t.id = ft.id ORDER BY t.id",
+		},
+		{
+			name:    "all three: where + order by + limit inside CTE, main query untouched",
+			query:   "WITH ft AS (SELECT id FROM ticket t WHERE t.deleted_at = 0) SELECT * FROM ft JOIN ticket t ON t.id = ft.id GROUP BY t.id ORDER BY t.id",
+			cte:     "ft",
+			where:   "(t.id > $0)",
+			orderBy: []string{"t.id ASC"},
+			limit:   "$0",
+			out:     "WITH ft AS (SELECT id FROM ticket t WHERE t.deleted_at = 0 AND (t.id > $0) ORDER BY t.id ASC LIMIT $0) SELECT * FROM ft JOIN ticket t ON t.id = ft.id GROUP BY t.id ORDER BY t.id",
+		},
+		{
+			name: "multi-CTE: target only the specified CTE",
+			query: `WITH ft AS (SELECT id FROM ticket t WHERE t.deleted_at = 0),
+					other AS (SELECT id FROM other_table)
+					SELECT * FROM ft JOIN ticket t ON t.id = ft.id ORDER BY t.id`,
+			cte:     "ft",
+			where:   "(t.id > $0)",
+			orderBy: []string{"t.id ASC"},
+			limit:   "$0",
+			// Build() normalizes whitespace across the whole query
+			out: `WITH ft AS (SELECT id FROM ticket t WHERE t.deleted_at = 0 AND (t.id > $0) ORDER BY t.id ASC LIMIT $0), other AS (SELECT id FROM other_table) SELECT * FROM ft JOIN ticket t ON t.id = ft.id ORDER BY t.id`,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewSQLModifier(tc.query)
+			m.SetCTETarget(tc.cte)
+
+			if tc.where != "" {
+				if err := m.AppendWhere(tc.where); err != nil {
+					t.Fatalf("AppendWhere error: %v", err)
+				}
+			}
+			if len(tc.orderBy) > 0 {
+				if err := m.SetOrderBy(tc.orderBy...); err != nil {
+					t.Fatalf("SetOrderBy error: %v", err)
+				}
+			}
+			if tc.limit != "" {
+				if err := m.SetLimit(tc.limit); err != nil {
+					t.Fatalf("SetLimit error: %v", err)
+				}
+			}
+
+			got, err := m.Build()
+			if err != nil {
+				t.Fatalf("Build error: %v", err)
+			}
+
+			if !strings.EqualFold(strings.TrimSpace(got), strings.TrimSpace(tc.out)) {
+				t.Errorf("output mismatch\nwant: %s\n got: %s", tc.out, got)
+			}
+		})
+	}
+}
+
+func TestCTETargetNotFound(t *testing.T) {
+	m := NewSQLModifier("WITH foo AS (SELECT id FROM t) SELECT * FROM foo")
+	m.SetCTETarget("nonexistent")
+
+	err := m.AppendWhere("id = 1")
+	if err == nil {
+		t.Error("expected error when CTE not found, got nil")
+	}
 }

@@ -19,7 +19,6 @@ func newBuilder(ks *Kuysor) *builder {
 func (b *builder) build() (string, error) {
 
 	var (
-		// uPaging *uPaging = b.ks.uTabling.uPaging
 		vCursor *vCursor = b.ks.vTabling.vCursor
 		vOffset *vOffset = b.ks.vTabling.vOffset
 		vSorts  *vSorts  = b.ks.vTabling.vSorts
@@ -27,17 +26,11 @@ func (b *builder) build() (string, error) {
 
 	b.sqlMod = modifier.NewSQLModifier(b.ks.sql)
 
-	// if uPaging != nil {
-	// 	err := b.handlePagination()
-	// 	if err != nil {
-	// 		return "", err
-	// 	}
-	// } else if vSorts != nil {
-	// 	err := b.applySorts(vSorts)
-	// 	if err != nil {
-	// 		return "", err
-	// 	}
-	// }
+	// when the user has specified a CTE to target, tell the modifier so that
+	// all subsequent WHERE / ORDER BY / LIMIT calls operate on that CTE body
+	if b.ks.uTabling != nil && b.ks.uTabling.uPaging != nil && b.ks.uTabling.uPaging.CTETarget != "" {
+		b.sqlMod.SetCTETarget(b.ks.uTabling.uPaging.CTETarget)
+	}
 
 	if vCursor != nil {
 		err := b.handlePaginationCursor()
@@ -120,10 +113,7 @@ func (b *builder) handlePaginationOffset() (err error) {
 		return err
 	}
 
-	// if offset is not set, it means it is not the first page
-	// so we need to apply where clause
 	if vOffset != nil {
-
 		err = b.applyOffset()
 		if err != nil {
 			return err
@@ -149,14 +139,14 @@ func (b *builder) applyWhere() (err error) {
 		return err
 	}
 
+	var condition string
 	if len(exprs) == 1 {
-		b.sqlMod.AppendWhere(exprs[0].Expression)
+		condition = exprs[0].Expression
 	} else {
-		orExprs := modifier.NewNestedCondition("OR", exprs...)
-		b.sqlMod.AppendWhere(orExprs.Expression)
+		condition = modifier.NewNestedCondition("OR", exprs...).Expression
 	}
 
-	return
+	return b.sqlMod.AppendWhere(condition)
 
 }
 
@@ -291,7 +281,7 @@ func (b *builder) getCursorValue(vSort *vSort) (col *string, err error) {
 	return
 }
 
-// constructExpr constructs the comparison expression.
+// constructCompExpr constructs the comparison expression.
 func (b *builder) constructCompExpr(vSort *vSort, operator string) (cnd modifier.SQLCondition, err error) {
 
 	var (
@@ -331,7 +321,9 @@ func (b *builder) applyOffset() error {
 		offset = b.ks.uTabling.uPaging.Offset
 	)
 
-	b.sqlMod.SetOffset(defaultInternalPlaceHolder)
+	if err := b.sqlMod.SetOffset(defaultInternalPlaceHolder); err != nil {
+		return err
+	}
 
 	b.ks.vArgs = append(b.ks.vArgs, offset)
 
@@ -345,7 +337,9 @@ func (b *builder) applyLimit() error {
 		limit = b.ks.uTabling.uPaging.Limit
 	)
 
-	b.sqlMod.SetLimit(defaultInternalPlaceHolder)
+	if err := b.sqlMod.SetLimit(defaultInternalPlaceHolder); err != nil {
+		return err
+	}
 
 	b.ks.vArgs = append(b.ks.vArgs, limit)
 
@@ -368,7 +362,9 @@ func (b *builder) applyLimitAndSorts() error {
 		}
 	}
 
-	b.sqlMod.SetLimit(defaultInternalPlaceHolder)
+	if err := b.sqlMod.SetLimit(defaultInternalPlaceHolder); err != nil {
+		return err
+	}
 
 	b.ks.vArgs = append(b.ks.vArgs, limit+1)
 
@@ -378,6 +374,8 @@ func (b *builder) applyLimitAndSorts() error {
 }
 
 // applySorts applies the sorting to the sql query.
+// When cteTarget is active the ORDER BY goes into the CTE body AND is mirrored
+// on the main query so the joined result set is returned in the same order.
 func (b *builder) applySorts(vSorts *vSorts) error {
 
 	var clauses []string
@@ -415,7 +413,20 @@ func (b *builder) applySorts(vSorts *vSorts) error {
 		clauses = append(clauses, fmt.Sprintf("%s %s", vSort.column, direction))
 	}
 
-	b.sqlMod.SetOrderBy(clauses...)
+	// Apply ORDER BY to the CTE body (or main query when no CTE target)
+	if err := b.sqlMod.SetOrderBy(clauses...); err != nil {
+		return err
+	}
+
+	// When a CTE target is active, also mirror the ORDER BY on the main query.
+	// The CTE handles row selection in the right order; the main query needs a
+	// matching ORDER BY so the final joined result set is returned consistently.
+	if b.ks.uTabling != nil && b.ks.uTabling.uPaging != nil && b.ks.uTabling.uPaging.CTETarget != "" {
+		if err := b.sqlMod.SetMainOrderBy(clauses...); err != nil {
+			return err
+		}
+	}
+
 	return nil
 
 }
