@@ -84,20 +84,48 @@ func (b *builder) handlePagination() (err error) {
 func (b *builder) handlePaginationCursor() (err error) {
 
 	var (
-		vCursor = b.ks.vTabling.vCursor
+		vCursor    = b.ks.vTabling.vCursor
+		cursorArgs []any
 	)
 
 	// if cursor is not empty, it means it is not the first page
 	// so we need to apply where clause
 	if vCursor != nil && vCursor.cursor != "" {
+		// snapshot vArgs length before WHERE so we can identify the cursor args
+		vArgsBefore := len(b.ks.vArgs)
 		err = b.applyWhere()
 		if err != nil {
 			return err
 		}
+		// capture the args added by applyWhere (cursor values)
+		if len(b.ks.vArgs) > vArgsBefore {
+			cursorArgs = make([]any, len(b.ks.vArgs)-vArgsBefore)
+			copy(cursorArgs, b.ks.vArgs[vArgsBefore:])
+		}
 	}
 
 	// apply limit and sorts
-	return b.applyLimitAndSorts()
+	if err = b.applyLimitAndSorts(); err != nil {
+		return err
+	}
+
+	// When WHERE mode is CTETargetModeBoth, the cursor WHERE condition is placed
+	// in both the CTE body (early in the string) and the main query (late in the
+	// string, after LIMIT). The internal placeholder for the main WHERE therefore
+	// appears AFTER the LIMIT placeholder in the final SQL string, so we append
+	// the cursor arg(s) now — after limit+1 was added — to keep vArgs aligned
+	// with placeholder string order: [CTE WHERE, CTE LIMIT, main WHERE].
+	if len(cursorArgs) > 0 && b.ks.uTabling != nil && b.ks.uTabling.uPaging != nil && b.ks.uTabling.uPaging.CTETarget != "" {
+		var opts *CTEOptions
+		if b.ks.uTabling.uPaging.CTEOptions != nil {
+			opts = b.ks.uTabling.uPaging.CTEOptions
+		}
+		if effectiveWhereMode(opts) == CTETargetModeBoth {
+			b.ks.vArgs = append(b.ks.vArgs, cursorArgs...)
+		}
+	}
+
+	return nil
 
 }
 
@@ -107,6 +135,21 @@ func (b *builder) handlePaginationOffset() (err error) {
 		vOffset = b.ks.vTabling.vOffset
 		vSorts  = b.ks.vTabling.vSorts
 	)
+
+	// When LIMIT/OFFSET mode is CTETargetModeBoth we must interleave args in
+	// string-position order: CTE_LIMIT, CTE_OFFSET, main_LIMIT, main_OFFSET.
+	// Delegating to applyLimit/applyOffset would produce the wrong order
+	// ([limit,limit,offset,offset] instead of [limit,offset,limit,offset]),
+	// so handle this case explicitly at this level.
+	if b.ks.uTabling.uPaging.CTETarget != "" {
+		var opts *CTEOptions
+		if b.ks.uTabling.uPaging.CTEOptions != nil {
+			opts = b.ks.uTabling.uPaging.CTEOptions
+		}
+		if effectiveLimitOffsetMode(opts) == CTETargetModeBoth {
+			return b.handlePaginationOffsetBoth(vOffset, vSorts)
+		}
+	}
 
 	err = b.applyLimit()
 	if err != nil {
@@ -131,6 +174,50 @@ func (b *builder) handlePaginationOffset() (err error) {
 
 }
 
+// handlePaginationOffsetBoth handles the CTETargetModeBoth case for offset pagination.
+// It writes CTE modifications first, then main-query modifications, so that vArgs
+// stays aligned with the internal-placeholder string-position order:
+// [CTE LIMIT, CTE OFFSET, main LIMIT, main OFFSET].
+func (b *builder) handlePaginationOffsetBoth(vOffset *vOffset, vSorts *vSorts) error {
+
+	limit := b.ks.uTabling.uPaging.Limit
+
+	// ── CTE phase ──────────────────────────────────────────────────────────────
+	if err := b.sqlMod.SetLimit(defaultInternalPlaceHolder); err != nil {
+		return err
+	}
+	b.ks.vArgs = append(b.ks.vArgs, limit)
+
+	if vOffset != nil {
+		if err := b.sqlMod.SetOffset(defaultInternalPlaceHolder); err != nil {
+			return err
+		}
+		b.ks.vArgs = append(b.ks.vArgs, vOffset.Offset)
+	}
+
+	if vSorts != nil {
+		if err := b.applySorts(vSorts); err != nil {
+			return err
+		}
+	}
+
+	// ── Main phase ─────────────────────────────────────────────────────────────
+	if err := b.sqlMod.SetLimitMain(defaultInternalPlaceHolder); err != nil {
+		return err
+	}
+	b.ks.vArgs = append(b.ks.vArgs, limit)
+
+	if vOffset != nil {
+		if err := b.sqlMod.SetOffsetMain(defaultInternalPlaceHolder); err != nil {
+			return err
+		}
+		b.ks.vArgs = append(b.ks.vArgs, vOffset.Offset)
+	}
+
+	return nil
+
+}
+
 // applyWhere applies the where clause to the sql query.
 func (b *builder) applyWhere() (err error) {
 
@@ -146,7 +233,30 @@ func (b *builder) applyWhere() (err error) {
 		condition = modifier.NewNestedCondition("OR", exprs...).Expression
 	}
 
-	return b.sqlMod.AppendWhere(condition)
+	// When no CTE target is set, always route to main query.
+	if b.ks.uTabling.uPaging.CTETarget == "" {
+		return b.sqlMod.AppendWhere(condition)
+	}
+
+	var opts *CTEOptions
+	if b.ks.uTabling.uPaging.CTEOptions != nil {
+		opts = b.ks.uTabling.uPaging.CTEOptions
+	}
+	switch effectiveWhereMode(opts) {
+	case CTETargetModeCTE:
+		return b.sqlMod.AppendWhere(condition)
+	case CTETargetModeMain:
+		return b.sqlMod.AppendWhereMain(condition)
+	case CTETargetModeBoth:
+		// Place the condition string in both locations. vArgs duplication for the
+		// second placement is handled by the caller (handlePaginationCursor) AFTER
+		// applyLimitAndSorts runs, to ensure vArgs order matches placeholder string order.
+		if err := b.sqlMod.AppendWhere(condition); err != nil {
+			return err
+		}
+		return b.sqlMod.AppendWhereMain(condition)
+	}
+	return nil
 
 }
 
@@ -321,12 +431,32 @@ func (b *builder) applyOffset() error {
 		offset = b.ks.uTabling.uPaging.Offset
 	)
 
-	if err := b.sqlMod.SetOffset(defaultInternalPlaceHolder); err != nil {
-		return err
+	// When no CTE target is set, always route to main query.
+	if b.ks.uTabling.uPaging.CTETarget == "" {
+		if err := b.sqlMod.SetOffset(defaultInternalPlaceHolder); err != nil {
+			return err
+		}
+		b.ks.vArgs = append(b.ks.vArgs, offset)
+		return nil
 	}
 
-	b.ks.vArgs = append(b.ks.vArgs, offset)
-
+	var opts *CTEOptions
+	if b.ks.uTabling.uPaging.CTEOptions != nil {
+		opts = b.ks.uTabling.uPaging.CTEOptions
+	}
+	// CTETargetModeBoth is handled at the handlePaginationOffset level.
+	switch effectiveLimitOffsetMode(opts) {
+	case CTETargetModeCTE, CTETargetModeBoth:
+		if err := b.sqlMod.SetOffset(defaultInternalPlaceHolder); err != nil {
+			return err
+		}
+		b.ks.vArgs = append(b.ks.vArgs, offset)
+	case CTETargetModeMain:
+		if err := b.sqlMod.SetOffsetMain(defaultInternalPlaceHolder); err != nil {
+			return err
+		}
+		b.ks.vArgs = append(b.ks.vArgs, offset)
+	}
 	return nil
 
 }
@@ -337,12 +467,32 @@ func (b *builder) applyLimit() error {
 		limit = b.ks.uTabling.uPaging.Limit
 	)
 
-	if err := b.sqlMod.SetLimit(defaultInternalPlaceHolder); err != nil {
-		return err
+	// When no CTE target is set, always route to main query.
+	if b.ks.uTabling.uPaging.CTETarget == "" {
+		if err := b.sqlMod.SetLimit(defaultInternalPlaceHolder); err != nil {
+			return err
+		}
+		b.ks.vArgs = append(b.ks.vArgs, limit)
+		return nil
 	}
 
-	b.ks.vArgs = append(b.ks.vArgs, limit)
-
+	var opts *CTEOptions
+	if b.ks.uTabling.uPaging.CTEOptions != nil {
+		opts = b.ks.uTabling.uPaging.CTEOptions
+	}
+	// CTETargetModeBoth is handled at the handlePaginationOffset level.
+	switch effectiveLimitOffsetMode(opts) {
+	case CTETargetModeCTE, CTETargetModeBoth:
+		if err := b.sqlMod.SetLimit(defaultInternalPlaceHolder); err != nil {
+			return err
+		}
+		b.ks.vArgs = append(b.ks.vArgs, limit)
+	case CTETargetModeMain:
+		if err := b.sqlMod.SetLimitMain(defaultInternalPlaceHolder); err != nil {
+			return err
+		}
+		b.ks.vArgs = append(b.ks.vArgs, limit)
+	}
 	return nil
 
 }
@@ -362,20 +512,59 @@ func (b *builder) applyLimitAndSorts() error {
 		}
 	}
 
-	if err := b.sqlMod.SetLimit(defaultInternalPlaceHolder); err != nil {
-		return err
+	// When no CTE target is set, always route to main query.
+	if b.ks.uTabling.uPaging.CTETarget == "" {
+		if err := b.sqlMod.SetLimit(defaultInternalPlaceHolder); err != nil {
+			return err
+		}
+		b.ks.vArgs = append(b.ks.vArgs, limit+1)
+		return b.applySorts(&vSorts)
 	}
 
-	b.ks.vArgs = append(b.ks.vArgs, limit+1)
+	var opts *CTEOptions
+	if b.ks.uTabling.uPaging.CTEOptions != nil {
+		opts = b.ks.uTabling.uPaging.CTEOptions
+	}
+	switch effectiveLimitOffsetMode(opts) {
+	case CTETargetModeCTE:
+		if err := b.sqlMod.SetLimit(defaultInternalPlaceHolder); err != nil {
+			return err
+		}
+		b.ks.vArgs = append(b.ks.vArgs, limit+1)
+		return b.applySorts(&vSorts)
+	case CTETargetModeMain:
+		if err := b.sqlMod.SetLimitMain(defaultInternalPlaceHolder); err != nil {
+			return err
+		}
+		b.ks.vArgs = append(b.ks.vArgs, limit+1)
+		return b.applySorts(&vSorts)
+	case CTETargetModeBoth:
+		// String-position order for cursor+both:
+		// CTE LIMIT → CTE ORDER BY → main LIMIT → main ORDER BY
+		// So vArgs must be [limit+1, limit+1] with ORDER BY between the two LIMITs in SQL.
+		// CTE phase:
+		if err := b.sqlMod.SetLimit(defaultInternalPlaceHolder); err != nil {
+			return err
+		}
+		b.ks.vArgs = append(b.ks.vArgs, limit+1)
+		if err := b.applySorts(&vSorts); err != nil {
+			return err
+		}
+		// Main phase (appended after CTE ORDER BY is already in the string):
+		if err := b.sqlMod.SetLimitMain(defaultInternalPlaceHolder); err != nil {
+			return err
+		}
+		b.ks.vArgs = append(b.ks.vArgs, limit+1)
+		return nil
+	}
 
-	// set sorting for column
-	return b.applySorts(&vSorts)
+	return nil
 
 }
 
 // applySorts applies the sorting to the sql query.
-// When cteTarget is active the ORDER BY goes into the CTE body AND is mirrored
-// on the main query so the joined result set is returned in the same order.
+// Routing is controlled by CTEOptions.OrderBy when a CTE target is active.
+// Default (no options): ORDER BY goes into CTE body AND is mirrored on main query.
 func (b *builder) applySorts(vSorts *vSorts) error {
 
 	var clauses []string
@@ -391,7 +580,6 @@ func (b *builder) applySorts(vSorts *vSorts) error {
 
 		if vSort.isNullable() && vSort.nullSortMethod == CaseWhen {
 			clauses = append(clauses, fmt.Sprintf("CASE WHEN %s IS NULL THEN 1 ELSE 0 END %s", vSort.column, direction))
-
 		}
 
 		if vSort.isNullable() && vSort.nullSortMethod == FirstLast {
@@ -402,7 +590,6 @@ func (b *builder) applySorts(vSorts *vSorts) error {
 				lf = "FIRST"
 			}
 			clauses = append(clauses, fmt.Sprintf("%s %s NULLS %s", vSort.column, direction, lf))
-
 			continue
 		}
 
@@ -413,20 +600,29 @@ func (b *builder) applySorts(vSorts *vSorts) error {
 		clauses = append(clauses, fmt.Sprintf("%s %s", vSort.column, direction))
 	}
 
-	// Apply ORDER BY to the CTE body (or main query when no CTE target)
-	if err := b.sqlMod.SetOrderBy(clauses...); err != nil {
-		return err
+	// When no CTE target is set, always route ORDER BY to the main query.
+	if b.ks.uTabling == nil || b.ks.uTabling.uPaging == nil || b.ks.uTabling.uPaging.CTETarget == "" {
+		return b.sqlMod.SetOrderBy(clauses...)
 	}
 
-	// When a CTE target is active, also mirror the ORDER BY on the main query.
-	// The CTE handles row selection in the right order; the main query needs a
-	// matching ORDER BY so the final joined result set is returned consistently.
-	if b.ks.uTabling != nil && b.ks.uTabling.uPaging != nil && b.ks.uTabling.uPaging.CTETarget != "" {
-		if err := b.sqlMod.SetMainOrderBy(clauses...); err != nil {
+	var opts *CTEOptions
+	if b.ks.uTabling.uPaging.CTEOptions != nil {
+		opts = b.ks.uTabling.uPaging.CTEOptions
+	}
+	switch effectiveOrderByMode(opts) {
+	case CTETargetModeCTE:
+		// ORDER BY goes into CTE body only — do NOT mirror on main query.
+		return b.sqlMod.SetOrderBy(clauses...)
+	case CTETargetModeMain:
+		// ORDER BY goes onto the main query only — skip the CTE body.
+		return b.sqlMod.SetMainOrderBy(clauses...)
+	case CTETargetModeBoth:
+		// ORDER BY goes into CTE body AND is mirrored on the main query (default).
+		if err := b.sqlMod.SetOrderBy(clauses...); err != nil {
 			return err
 		}
+		return b.sqlMod.SetMainOrderBy(clauses...)
 	}
-
 	return nil
 
 }

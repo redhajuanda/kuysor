@@ -3,8 +3,9 @@ package kuysor
 type uPaging struct {
 	PaginationType PaginationType
 	Limit          int
-	Offset         int    // only used for offset pagination
-	Cursor         string // only used for cursor pagination
-	ColumnID       string // only used for cursor pagination
-	CTETarget      string // optional: name of the CTE whose body should be paginated
+	Offset         int        // only used for offset pagination
+	Cursor         string     // only used for cursor pagination
+	ColumnID       string     // only used for cursor pagination
+	CTETarget      string     // optional: name of the CTE whose body should be paginated
+	CTEOptions     *CTEOptions // optional: per-clause routing when CTETarget is set
 }

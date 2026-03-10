@@ -157,48 +157,68 @@ func (m *SQLModifier) findMainSelectPosition() int {
 	return -1
 }
 
-// ConvertToCount converts the SELECT query to a COUNT query
-// Replaces the SELECT columns with COUNT(*) as total_data while preserving all other clauses
+// ConvertToCount converts the main query's SELECT to COUNT(*).
+// Preserves CTEs, subqueries, JOINs, WHERE, and all other clauses.
 func (m *SQLModifier) ConvertToCount() error {
-	queryUpper := strings.ToUpper(m.query)
+	return m.ConvertToCountExpr("*")
+}
 
-	// Check if it's a SELECT query
-	if !strings.HasPrefix(queryUpper, "SELECT") {
-		return fmt.Errorf("query must start with SELECT")
+// ConvertToCountExpr converts the main query's SELECT to a COUNT query.
+// Only replaces the main query's SELECT (not in subqueries or CTEs).
+// expr: "*" for count(*), "1" for count(1), or a column name like "id" or "t.id" for count(id).
+func (m *SQLModifier) ConvertToCountExpr(expr string) error {
+	expr = strings.TrimSpace(expr)
+	if expr == "" {
+		expr = "*"
 	}
 
-	// Find the main SELECT position (not in subqueries)
+	// Must have a main SELECT (either at start or after WITH clause)
 	selectPos := m.findMainSelectPosition()
 	if selectPos == -1 {
 		return fmt.Errorf("could not find main SELECT clause")
 	}
 
-	// Find the FROM clause position
+	// Find the main FROM clause position (not in subqueries)
 	fromPos := m.findMainClausePosition("FROM")
 	if fromPos == -1 {
 		return fmt.Errorf("query must contain a FROM clause")
 	}
 
-	// Handle WITH clause (CTE) if present
-	withPos := m.findMainClausePosition("WITH")
+	// Handle WITH clause (CTE) if present - WITH is always at the start of the query
+	// (findMainClausePosition skips it when it's before main SELECT, so we check directly)
 	var withClause string
-	if withPos != -1 && withPos < selectPos {
-		// Extract the WITH clause up to the main SELECT
-		withClause = strings.TrimSpace(m.query[withPos:selectPos])
-		if !strings.HasSuffix(withClause, " ") {
-			withClause += " "
+	queryTrimmed := strings.TrimSpace(m.query)
+	if strings.HasPrefix(strings.ToUpper(queryTrimmed), "WITH") {
+		withPos := strings.Index(strings.ToUpper(m.query), "WITH")
+		if withPos != -1 && withPos < selectPos {
+			// Extract the WITH clause up to the main SELECT
+			withClause = strings.TrimSpace(m.query[withPos:selectPos])
+			if !strings.HasSuffix(withClause, " ") {
+				withClause += " "
+			}
 		}
 	}
 
-	// Extract everything from FROM onwards (including JOINs, WHERE, etc.)
+	// Extract everything from FROM onwards (including JOINs, WHERE, GROUP BY, etc.)
 	fromClause := strings.TrimSpace(m.query[fromPos:])
 
-	// Build the new query
+	// Build count expression: count(*), count(1), or count(column)
+	countExpr := "COUNT(*)"
+	exprUpper := strings.ToUpper(expr)
+	if exprUpper == "*" {
+		countExpr = "COUNT(*)"
+	} else if exprUpper == "1" {
+		countExpr = "COUNT(1)"
+	} else {
+		countExpr = "COUNT(" + expr + ")"
+	}
+
+	// Build the new query (no alias, just count)
 	var newQuery string
 	if withClause != "" {
-		newQuery = fmt.Sprintf("%sSELECT COUNT(*) AS total_data %s", withClause, fromClause)
+		newQuery = fmt.Sprintf("%sSELECT %s %s", withClause, countExpr, fromClause)
 	} else {
-		newQuery = fmt.Sprintf("SELECT COUNT(*) AS total_data %s", fromClause)
+		newQuery = fmt.Sprintf("SELECT %s %s", countExpr, fromClause)
 	}
 
 	m.query = newQuery
@@ -302,6 +322,24 @@ func (m *SQLModifier) SetOrderBy(orderBy ...string) error {
 // SELECT so the joined result set is returned in the correct order.
 func (m *SQLModifier) SetMainOrderBy(orderBy ...string) error {
 	m.setOrderByInternal(orderBy...)
+	return nil
+}
+
+// AppendWhereMain appends a WHERE condition to the main query, regardless of cteTarget.
+func (m *SQLModifier) AppendWhereMain(condition string) error {
+	m.appendWhereInternal(condition)
+	return nil
+}
+
+// SetLimitMain sets the LIMIT clause on the main query, regardless of cteTarget.
+func (m *SQLModifier) SetLimitMain(newLimit string) error {
+	m.setLimitInternal(newLimit)
+	return nil
+}
+
+// SetOffsetMain sets the OFFSET clause on the main query, regardless of cteTarget.
+func (m *SQLModifier) SetOffsetMain(newOffset string) error {
+	m.setOffsetInternal(newOffset)
 	return nil
 }
 

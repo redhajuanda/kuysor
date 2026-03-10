@@ -136,7 +136,12 @@ func (p *Kuysor) WithPlaceHolderType(placeHolderType PlaceHolderType) *Kuysor {
 // WHERE, ORDER BY, and LIMIT modifications instead of the main query.
 // This is useful when pagination is intentionally performed inside a CTE
 // for performance (e.g. to limit rows before expensive JOINs in the main query).
-func (p *Kuysor) WithCTETarget(cteName string) *Kuysor {
+//
+// An optional CTEOptions argument controls per-clause routing:
+//   - OrderBy:     where ORDER BY is injected (default: CTETargetModeBoth)
+//   - LimitOffset: where LIMIT/OFFSET is injected (default: CTETargetModeCTE)
+//   - Where:       where the cursor WHERE clause is injected (default: CTETargetModeCTE)
+func (p *Kuysor) WithCTETarget(cteName string, opts ...CTEOptions) *Kuysor {
 
 	if p.uTabling == nil {
 		p.uTabling = &uTabling{}
@@ -147,6 +152,10 @@ func (p *Kuysor) WithCTETarget(cteName string) *Kuysor {
 	}
 
 	p.uTabling.uPaging.CTETarget = cteName
+
+	if len(opts) > 0 {
+		p.uTabling.uPaging.CTEOptions = &opts[0]
+	}
 
 	return p
 

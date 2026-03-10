@@ -4,8 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
-
-	"github.com/redhajuanda/kuysor/modifier"
 )
 
 // Result represents the result of a query.
@@ -13,25 +11,6 @@ type Result struct {
 	Query string
 	Args  []any
 	ks    *Kuysor
-}
-
-// BuildCountQuery builds a count query from the original query.
-func BuildCountQuery(query string) (string, error) {
-
-	s := modifier.NewSQLModifier(query)
-
-	err := s.ConvertToCount()
-	if err != nil {
-		return "", fmt.Errorf("failed to convert to count query: %v", err)
-	}
-
-	count, err := s.Build()
-	if err != nil {
-		return "", fmt.Errorf("failed to build count query: %v", err)
-	}
-
-	return count, nil
-
 }
 
 // SanitizeMap handles the map data for the cursor pagination.

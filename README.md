@@ -180,6 +180,27 @@ Return args:
 ["active", "C", "C", 3, 11]
 ```
 
+### Converting to Count Query
+When you need the total number of rows (e.g., for pagination metadata), use `NewCount` to convert your SELECT query into a COUNT query. It replaces only the main query's SELECT clause (not in subqueries or CTEs).
+
+```go
+query := "SELECT id, code, name FROM users WHERE status = ?"
+
+// Default: count(*)
+countQuery, err := kuysor.NewCount(query).Build()
+// Result: SELECT COUNT(*) FROM users WHERE status = ?
+
+// Use count(1)
+countQuery, err := kuysor.NewCount(query).UseColumn("1").Build()
+// Result: SELECT COUNT(1) FROM users WHERE status = ?
+
+// Use count(id) or count(t.id)
+countQuery, err := kuysor.NewCount(query).UseColumn("id").Build()
+// Result: SELECT COUNT(id) FROM users WHERE status = ?
+```
+
+Works with CTEs, JOINs, subqueries, WHERE, GROUP BY, HAVING, ORDER BY, and LIMIT—only the main SELECT is replaced.
+
 ### Handling Nullable Columns
 If sorting involves nullable columns, specify them explicitly by adding `null` after the column name. This is mandatory to handle null values correctly, as they can affect the order of results.
 To indicate a nullable column, append `null` after the column name, like so:
@@ -231,12 +252,12 @@ Some queries use a CTE (Common Table Expression) to pre-filter rows, and the pag
 Without `WithCTETarget`, Kuysor places all modifications on the outermost `SELECT`. In a CTE-driven query this is wrong: the cursor `WHERE` clause refers to columns that only exist inside the CTE, and the `LIMIT` would apply after all joins/aggregations rather than before.
 
 ```sql
--- ❌ Wrong: Kuysor would add WHERE / ORDER BY / LIMIT here, on the outer SELECT
+-- ❌ Without WithCTETarget: WHERE / ORDER BY / LIMIT land on the outer SELECT
 WITH filtered_ticket AS (
     SELECT t.id
     FROM ticket t
     WHERE t.status = ?
-    -- ORDER BY and LIMIT should be here, but without WithCTETarget they won't be
+    -- ORDER BY and LIMIT should go here, inside the CTE
 )
 SELECT t.id, t.code, ...
 FROM filtered_ticket ft
@@ -244,9 +265,10 @@ JOIN ticket t ON t.id = ft.id
 GROUP BY t.id
 ```
 
-#### The Solution
+#### Basic Usage
 
-Use `WithCTETarget("cte_name")` to tell Kuysor which CTE body to modify. Kuysor locates the named CTE (case-insensitive), routes the cursor `WHERE`, `ORDER BY`, and `LIMIT` inside it, and then mirrors the same `ORDER BY` on the main query so the final result set is returned in a consistent order.
+Use `WithCTETarget("cte_name")` to tell Kuysor which CTE body to modify.  
+Kuysor locates the named CTE (case-insensitive), routes the cursor `WHERE`, `ORDER BY`, and `LIMIT` inside it, and mirrors the same `ORDER BY` on the main query so the final result set is returned in a consistent order.
 
 ```go
 query := `
@@ -282,7 +304,7 @@ WITH filtered_ticket AS (
 SELECT t.id, t.code
 FROM filtered_ticket ft JOIN ticket t ON t.id = ft.id
 GROUP BY t.id
-ORDER BY t.id DESC       -- ← mirrored on main query
+ORDER BY t.id DESC       -- ← mirrored on main query (default behaviour)
 ```
 ```go
 Args: ["active", 11]
@@ -322,6 +344,63 @@ Args: ["active", "<first_id>", 11]
 
 > **Note:** For previous-page queries the result set is automatically re-reversed by `SanitizeStruct` / `SanitizeMap`, so the caller always receives rows in the original sort order.
 
+#### Per-Clause Routing with `CTEOptions`
+
+By default Kuysor uses sensible routing for each clause:
+
+| Clause | Default routing |
+|---|---|
+| `ORDER BY` | Both CTE body **and** main query (`CTETargetModeBoth`) |
+| `LIMIT` / `OFFSET` | CTE body only (`CTETargetModeCTE`) |
+| Cursor `WHERE` | CTE body only (`CTETargetModeCTE`) |
+
+You can override any of these by passing a `CTEOptions` value as the second argument to `WithCTETarget`:
+
+```go
+res, err := kuysor.
+    NewQuery(query, kuysor.Cursor).
+    WithCTETarget("filtered_ticket", kuysor.CTEOptions{
+        OrderBy:     kuysor.CTETargetModeBoth, // ORDER BY in CTE + mirrored on main (default)
+        LimitOffset: kuysor.CTETargetModeCTE,  // LIMIT only inside CTE (default)
+        Where:       kuysor.CTETargetModeCTE,  // cursor WHERE only inside CTE (default)
+    }).
+    WithOrderBy("-t.id").
+    WithLimit(10).
+    WithArgs("active").
+    Build()
+```
+
+The three routing modes available for each clause are:
+
+| Mode | Constant | Description |
+|---|---|---|
+| Default | `CTETargetModeDefault` (zero value) | Uses the natural default for that clause (see table above). |
+| CTE only | `CTETargetModeCTE` | Clause is injected inside the named CTE body only. |
+| Main only | `CTETargetModeMain` | Clause is injected on the outer SELECT only; the CTE is not modified. |
+| Both | `CTETargetModeBoth` | Clause is injected in both places. Arguments are duplicated when `Both` is used for `LIMIT`/`OFFSET` or `WHERE`. |
+
+**Example — LIMIT on main query only** (useful when the CTE already has its own LIMIT):
+```go
+WithCTETarget("filtered_ticket", kuysor.CTEOptions{
+    LimitOffset: kuysor.CTETargetModeMain,
+})
+```
+
+**Example — ORDER BY inside CTE only, no mirroring on main query:**
+```go
+WithCTETarget("filtered_ticket", kuysor.CTEOptions{
+    OrderBy: kuysor.CTETargetModeCTE,
+})
+```
+
+**Example — cursor WHERE on both CTE and main query** (e.g. to apply double filtering):
+```go
+WithCTETarget("filtered_ticket", kuysor.CTEOptions{
+    Where: kuysor.CTETargetModeBoth,
+})
+// Note: cursor arg is duplicated → Args: ["active", "<cursor_id>", "<cursor_id>", 11]
+```
+
 #### Multiple CTEs
 
 If your query has several CTEs, `WithCTETarget` modifies **only the named one**; all other CTEs are left unchanged:
@@ -357,6 +436,7 @@ res, err := kuysor.
 | CTE name must exist in the query | `Build()` returns an error if the name is not found (case-insensitive match). |
 | Sort columns must appear in the CTE's `SELECT` | Required for cursor generation — the same rule as standard cursor pagination. |
 | One nullable sort column maximum | Same limitation as standard cursor pagination. |
+
 
 ### Configuring Options 
 

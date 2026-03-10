@@ -626,3 +626,198 @@ func TestCTETargetValidationCTENotFound(t *testing.T) {
 		t.Error("expected error for non-existent CTE name, got nil")
 	}
 }
+
+// TestCTETargetOptions verifies per-clause routing via CTEOptions.
+func TestCTETargetOptions(t *testing.T) {
+	baseQuery := `
+		WITH cte AS (
+			SELECT t.id FROM ticket t
+			WHERE t.deleted_at = 0 AND t.status = ?
+		)
+		SELECT t.id, t.code
+		FROM cte
+		JOIN ticket t ON t.id = cte.id
+		ORDER BY t.id
+	`
+
+	findBoundary := func(t *testing.T, q string) (cteBody, mainBody string) {
+		t.Helper()
+		q = strings.ToLower(q)
+		idx := strings.Index(q, ") select")
+		if idx == -1 {
+			t.Fatalf("could not find CTE boundary in: %s", q)
+		}
+		return q[:idx], q[idx:]
+	}
+
+	tests := []struct {
+		name            string
+		opts            CTEOptions
+		paginationType  PaginationType
+		cursor          string
+		wantCTEHas      []string
+		wantCTENotHas   []string
+		wantMainHas     []string
+		wantMainNotHas  []string
+		wantArgs        []any
+	}{
+		{
+			name:           "default (no options) — ORDER BY both, LIMIT/cursor WHERE in CTE",
+			opts:           CTEOptions{},
+			paginationType: Cursor,
+			wantCTEHas:     []string{"order by t.id asc", "limit ?"},
+			wantMainHas:    []string{"order by t.id asc"},
+			wantArgs:       []any{"active", 11},
+		},
+		{
+			name: "ORDER BY CTE only — no mirror on main",
+			opts: CTEOptions{
+				OrderBy: CTETargetModeCTE,
+			},
+			paginationType: Cursor,
+			wantCTEHas:     []string{"order by t.id asc", "limit ?"},
+			wantMainNotHas: []string{"order by t.id asc"},
+			wantArgs:       []any{"active", 11},
+		},
+		{
+			name: "ORDER BY main only — no ORDER BY in CTE",
+			opts: CTEOptions{
+				OrderBy: CTETargetModeMain,
+			},
+			paginationType: Cursor,
+			wantCTENotHas:  []string{"order by"},
+			wantCTEHas:     []string{"limit ?"},
+			wantMainHas:    []string{"order by t.id asc"},
+			wantArgs:       []any{"active", 11},
+		},
+		{
+			name: "ORDER BY both (explicit)",
+			opts: CTEOptions{
+				OrderBy: CTETargetModeBoth,
+			},
+			paginationType: Cursor,
+			wantCTEHas:     []string{"order by t.id asc", "limit ?"},
+			wantMainHas:    []string{"order by t.id asc"},
+			wantArgs:       []any{"active", 11},
+		},
+		{
+			name: "LIMIT main only — no LIMIT in CTE",
+			opts: CTEOptions{
+				LimitOffset: CTETargetModeMain,
+			},
+			paginationType: Cursor,
+			wantCTENotHas:  []string{"limit ?"},
+			wantMainHas:    []string{"limit ?", "order by t.id asc"},
+			wantArgs:       []any{"active", 11},
+		},
+		{
+			name: "LIMIT both — LIMIT in CTE and main",
+			opts: CTEOptions{
+				LimitOffset: CTETargetModeBoth,
+			},
+			paginationType: Cursor,
+			wantCTEHas:     []string{"limit ?"},
+			wantMainHas:    []string{"limit ?"},
+			wantArgs:       []any{"active", 11, 11},
+		},
+		{
+			name: "cursor WHERE main only — WHERE only on main, not in CTE",
+			opts: CTEOptions{
+				Where: CTETargetModeMain,
+			},
+			paginationType: Cursor,
+			cursor:         base64Encode(`{"prefix":"next","cols":{"id":"100"}}`),
+			wantCTENotHas:  []string{"t.id >"},
+			wantMainHas:    []string{"t.id >"},
+			wantArgs:       []any{"active", "100", 11},
+		},
+		{
+			name: "cursor WHERE both — WHERE in CTE and main",
+			opts: CTEOptions{
+				Where: CTETargetModeBoth,
+			},
+			paginationType: Cursor,
+			cursor:         base64Encode(`{"prefix":"next","cols":{"id":"100"}}`),
+			wantCTEHas:     []string{"t.id >"},
+			wantMainHas:    []string{"t.id >"},
+			// placeholder string order: CTE WHERE → CTE LIMIT → main WHERE
+			wantArgs: []any{"active", "100", 11, "100"},
+		},
+		{
+			name: "offset pagination LIMIT main only",
+			opts: CTEOptions{
+				LimitOffset: CTETargetModeMain,
+			},
+			paginationType: Offset,
+			wantCTENotHas:  []string{"limit ?", "offset ?"},
+			wantMainHas:    []string{"limit ?", "offset ?"},
+			wantArgs:       []any{"active", 10, 0},
+		},
+		{
+			name: "offset pagination LIMIT both",
+			opts: CTEOptions{
+				LimitOffset: CTETargetModeBoth,
+			},
+			paginationType: Offset,
+			wantCTEHas:     []string{"limit ?", "offset ?"},
+			wantMainHas:    []string{"limit ?", "offset ?"},
+			// placeholder string order: CTE LIMIT → CTE OFFSET → main LIMIT → main OFFSET
+			wantArgs: []any{"active", 10, 0, 10, 0},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ks := NewQuery(baseQuery, tt.paginationType).
+				WithCTETarget("cte", tt.opts).
+				WithOrderBy("t.id").
+				WithLimit(10).
+				WithArgs("active")
+
+			if tt.paginationType == Offset {
+				ks = ks.WithOffset(0)
+			} else {
+				ks = ks.WithCursor(tt.cursor)
+			}
+
+			res, err := ks.Build()
+			if err != nil {
+				t.Fatalf("unexpected build error: %v", err)
+			}
+
+			cteBody, mainBody := findBoundary(t, res.Query)
+
+			for _, want := range tt.wantCTEHas {
+				if !strings.Contains(cteBody, want) {
+					t.Errorf("CTE body should contain %q\n  got: %s", want, cteBody)
+				}
+			}
+			for _, notWant := range tt.wantCTENotHas {
+				if strings.Contains(cteBody, notWant) {
+					t.Errorf("CTE body should NOT contain %q\n  got: %s", notWant, cteBody)
+				}
+			}
+			for _, want := range tt.wantMainHas {
+				if !strings.Contains(mainBody, want) {
+					t.Errorf("main body should contain %q\n  got: %s", want, mainBody)
+				}
+			}
+			for _, notWant := range tt.wantMainNotHas {
+				if strings.Contains(mainBody, notWant) {
+					t.Errorf("main body should NOT contain %q\n  got: %s", notWant, mainBody)
+				}
+			}
+
+			if len(tt.wantArgs) > 0 {
+				if len(res.Args) != len(tt.wantArgs) {
+					t.Fatalf("args: expected %v, got %v", tt.wantArgs, res.Args)
+				}
+				for i, v := range tt.wantArgs {
+					if v != res.Args[i] {
+						t.Errorf("arg[%d]: expected %v, got %v", i, v, res.Args[i])
+					}
+				}
+			}
+		})
+	}
+}

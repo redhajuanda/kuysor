@@ -215,8 +215,8 @@ func BenchmarkPlaceholderReplacement(b *testing.B) {
 	}
 }
 
-// BenchmarkBuildCountQuery benchmarks count query building
-func BenchmarkBuildCountQuery(b *testing.B) {
+// BenchmarkNewCount benchmarks count query building
+func BenchmarkNewCount(b *testing.B) {
 	queries := []string{
 		"SELECT id, name FROM users WHERE status = 'active'",
 		"SELECT u.id, u.name, p.title FROM users u LEFT JOIN profiles p ON u.id = p.user_id WHERE u.status = 'active'",
@@ -227,7 +227,7 @@ func BenchmarkBuildCountQuery(b *testing.B) {
 		b.Run(fmt.Sprintf("query_%d", i+1), func(b *testing.B) {
 			b.ResetTimer()
 			for j := 0; j < b.N; j++ {
-				_, err := BuildCountQuery(query)
+				_, err := NewCount(query).Build()
 				if err != nil {
 					b.Fatal(err)
 				}
