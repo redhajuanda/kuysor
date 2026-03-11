@@ -181,25 +181,134 @@ Return args:
 ```
 
 ### Converting to Count Query
-When you need the total number of rows (e.g., for pagination metadata), use `NewCount` to convert your SELECT query into a COUNT query. It replaces only the main query's SELECT clause (not in subqueries or CTEs).
+
+Use `NewCount` to convert a SELECT query into a COUNT query for pagination metadata (total row count). Pass the same query you use for data fetching — Kuysor handles all the structural transformations needed to produce a correct scalar count.
+
+#### Basic usage
 
 ```go
 query := "SELECT id, code, name FROM users WHERE status = ?"
 
-// Default: count(*)
+// Default: COUNT(*)
 countQuery, err := kuysor.NewCount(query).Build()
-// Result: SELECT COUNT(*) FROM users WHERE status = ?
+// → SELECT COUNT(*) FROM users WHERE status = ?
 
-// Use count(1)
+// COUNT(1)
 countQuery, err := kuysor.NewCount(query).UseColumn("1").Build()
-// Result: SELECT COUNT(1) FROM users WHERE status = ?
+// → SELECT COUNT(1) FROM users WHERE status = ?
 
-// Use count(id) or count(t.id)
+// COUNT(id) or COUNT(t.id)
 countQuery, err := kuysor.NewCount(query).UseColumn("id").Build()
-// Result: SELECT COUNT(id) FROM users WHERE status = ?
+// → SELECT COUNT(id) FROM users WHERE status = ?
 ```
 
-Works with CTEs, JOINs, subqueries, WHERE, GROUP BY, HAVING, ORDER BY, and LIMIT—only the main SELECT is replaced.
+WHERE, JOIN, and CTE clauses are preserved. Only the main SELECT list is replaced.
+
+#### GROUP BY and HAVING — subquery wrapping
+
+A query with `GROUP BY` returns one row per group, so a naive `SELECT COUNT(*) … GROUP BY …` returns multiple rows instead of a single total. Kuysor detects this and wraps the original query in a subquery:
+
+```go
+query := "SELECT department, COUNT(employee_id) FROM employees GROUP BY department"
+
+countQuery, err := kuysor.NewCount(query).Build()
+// → SELECT COUNT(*) FROM (
+//       SELECT department, COUNT(employee_id) FROM employees GROUP BY department
+//   ) kuysor_count
+```
+
+`HAVING` is preserved inside the subquery so group filters remain effective:
+
+```go
+query := "SELECT department FROM employees GROUP BY department HAVING COUNT(*) > 5"
+
+countQuery, err := kuysor.NewCount(query).Build()
+// → SELECT COUNT(*) FROM (
+//       SELECT department FROM employees GROUP BY department HAVING COUNT(*) > 5
+//   ) kuysor_count
+```
+
+#### DISTINCT — subquery wrapping
+
+`SELECT DISTINCT` must also be wrapped. Without wrapping, `COUNT(*)` counts all rows and ignores the `DISTINCT`, producing an incorrect (inflated) total:
+
+```go
+query := "SELECT DISTINCT department FROM employees"
+
+countQuery, err := kuysor.NewCount(query).Build()
+// → SELECT COUNT(*) FROM (SELECT DISTINCT department FROM employees) kuysor_count
+//
+// Without wrapping this would be: SELECT COUNT(*) FROM employees
+// which counts all rows, not distinct departments.
+```
+
+#### UNION / UNION ALL — subquery wrapping
+
+A top-level `UNION` must be wrapped too. Without wrapping, `SELECT COUNT(*) FROM t1 UNION SELECT … FROM t2` returns multiple rows (one per union branch) instead of a single total:
+
+```go
+query := "SELECT id FROM employees UNION ALL SELECT id FROM contractors"
+
+countQuery, err := kuysor.NewCount(query).Build()
+// → SELECT COUNT(*) FROM (
+//       SELECT id FROM employees UNION ALL SELECT id FROM contractors
+//   ) kuysor_count
+```
+
+#### ORDER BY, LIMIT, and OFFSET — always stripped
+
+These clauses are meaningless for a count and are always removed, whether or not wrapping is needed:
+
+```go
+query := "SELECT id, name FROM users WHERE status = ? ORDER BY name LIMIT 10 OFFSET 20"
+
+countQuery, err := kuysor.NewCount(query).Build()
+// → SELECT COUNT(*) FROM users WHERE status = ?
+//   (ORDER BY, LIMIT, OFFSET removed)
+```
+
+When wrapping is needed (GROUP BY / DISTINCT / UNION), `ORDER BY` and `LIMIT` are stripped from the **inner** query before wrapping, so they don't accidentally limit the counted rows:
+
+```go
+query := "SELECT department, COUNT(*) FROM employees GROUP BY department ORDER BY department LIMIT 10"
+
+countQuery, err := kuysor.NewCount(query).Build()
+// → SELECT COUNT(*) FROM (
+//       SELECT department, COUNT(*) FROM employees GROUP BY department
+//       -- ORDER BY and LIMIT stripped from inner query
+//   ) kuysor_count
+```
+
+#### CTE queries
+
+CTEs are always preserved at the statement level so the inner subquery can reference them:
+
+```go
+query := `
+    WITH dept AS (SELECT id, name FROM departments)
+    SELECT d.name, COUNT(*) FROM employees e
+    JOIN dept d ON e.dept_id = d.id
+    GROUP BY d.name
+`
+countQuery, err := kuysor.NewCount(query).Build()
+// → WITH dept AS (SELECT id, name FROM departments)
+//   SELECT COUNT(*) FROM (
+//       SELECT d.name, COUNT(*) FROM employees e
+//       JOIN dept d ON e.dept_id = d.id GROUP BY d.name
+//   ) kuysor_count
+```
+
+#### Database compatibility
+
+The subquery alias `kuysor_count` is written **without** the `AS` keyword (`FROM (...) kuysor_count`), which is compatible with all major databases including Oracle (which does not support `AS` for table aliases in `FROM`).
+
+| Database | Supported |
+|---|---|
+| MySQL | ✓ |
+| PostgreSQL | ✓ |
+| SQL Server | ✓ |
+| Snowflake | ✓ |
+| Oracle | ✓ |
 
 ### Handling Nullable Columns
 If sorting involves nullable columns, specify them explicitly by adding `null` after the column name. This is mandatory to handle null values correctly, as they can affect the order of results.

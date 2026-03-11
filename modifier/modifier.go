@@ -166,6 +166,10 @@ func (m *SQLModifier) ConvertToCount() error {
 // ConvertToCountExpr converts the main query's SELECT to a COUNT query.
 // Only replaces the main query's SELECT (not in subqueries or CTEs).
 // expr: "*" for count(*), "1" for count(1), or a column name like "id" or "t.id" for count(id).
+//
+// Queries with GROUP BY, DISTINCT, or UNION at the main level are wrapped in a subquery
+// to produce a correct scalar count. ORDER BY, LIMIT, and OFFSET are always stripped
+// since they are meaningless for a count.
 func (m *SQLModifier) ConvertToCountExpr(expr string) error {
 	expr = strings.TrimSpace(expr)
 	if expr == "" {
@@ -178,20 +182,57 @@ func (m *SQLModifier) ConvertToCountExpr(expr string) error {
 		return fmt.Errorf("could not find main SELECT clause")
 	}
 
-	// Find the main FROM clause position (not in subqueries)
+	// Must have a main FROM clause
 	fromPos := m.findMainClausePosition("FROM")
 	if fromPos == -1 {
 		return fmt.Errorf("query must contain a FROM clause")
 	}
 
-	// Handle WITH clause (CTE) if present - WITH is always at the start of the query
-	// (findMainClausePosition skips it when it's before main SELECT, so we check directly)
+	// Build the count expression
+	var countExpr string
+	switch strings.ToUpper(expr) {
+	case "*":
+		countExpr = "COUNT(*)"
+	case "1":
+		countExpr = "COUNT(1)"
+	default:
+		countExpr = "COUNT(" + expr + ")"
+	}
+
+	// Queries with GROUP BY, DISTINCT, or UNION must be wrapped in a subquery;
+	// otherwise COUNT would return multiple rows or lose distinctness.
+	if m.hasMainGroupBy() || m.hasMainDistinct() || m.hasMainUnion() {
+		// Strip ORDER BY / LIMIT / OFFSET — meaningless inside a counting subquery.
+		m.stripMainOrderByAndLimit()
+
+		// Re-find selectPos after stripping (positions before the cut are unchanged,
+		// but re-finding is safer in case future stripping changes that).
+		selectPos = m.findMainSelectPosition()
+
+		// Extract WITH clause if present so it stays at the statement level
+		// (CTEs must be accessible to the inner subquery).
+		var withClause string
+		if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(m.query)), "WITH") {
+			withPos := strings.Index(strings.ToUpper(m.query), "WITH")
+			if withPos != -1 && withPos < selectPos {
+				withClause = strings.TrimSpace(m.query[withPos:selectPos])
+			}
+		}
+
+		innerQuery := strings.TrimSpace(m.query[selectPos:])
+		if withClause != "" {
+			m.query = fmt.Sprintf("%s SELECT %s FROM (%s) kuysor_count", withClause, countExpr, innerQuery)
+		} else {
+			m.query = fmt.Sprintf("SELECT %s FROM (%s) kuysor_count", countExpr, innerQuery)
+		}
+		return nil
+	}
+
+	// Simple case: replace SELECT columns with COUNT expression.
 	var withClause string
-	queryTrimmed := strings.TrimSpace(m.query)
-	if strings.HasPrefix(strings.ToUpper(queryTrimmed), "WITH") {
+	if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(m.query)), "WITH") {
 		withPos := strings.Index(strings.ToUpper(m.query), "WITH")
 		if withPos != -1 && withPos < selectPos {
-			// Extract the WITH clause up to the main SELECT
 			withClause = strings.TrimSpace(m.query[withPos:selectPos])
 			if !strings.HasSuffix(withClause, " ") {
 				withClause += " "
@@ -199,30 +240,64 @@ func (m *SQLModifier) ConvertToCountExpr(expr string) error {
 		}
 	}
 
-	// Extract everything from FROM onwards (including JOINs, WHERE, GROUP BY, etc.)
 	fromClause := strings.TrimSpace(m.query[fromPos:])
-
-	// Build count expression: count(*), count(1), or count(column)
-	countExpr := "COUNT(*)"
-	exprUpper := strings.ToUpper(expr)
-	if exprUpper == "*" {
-		countExpr = "COUNT(*)"
-	} else if exprUpper == "1" {
-		countExpr = "COUNT(1)"
-	} else {
-		countExpr = "COUNT(" + expr + ")"
-	}
-
-	// Build the new query (no alias, just count)
-	var newQuery string
 	if withClause != "" {
-		newQuery = fmt.Sprintf("%sSELECT %s %s", withClause, countExpr, fromClause)
+		m.query = fmt.Sprintf("%sSELECT %s %s", withClause, countExpr, fromClause)
 	} else {
-		newQuery = fmt.Sprintf("SELECT %s %s", countExpr, fromClause)
+		m.query = fmt.Sprintf("SELECT %s %s", countExpr, fromClause)
 	}
 
-	m.query = newQuery
+	// Strip ORDER BY / LIMIT / OFFSET — not needed for a count query.
+	m.stripMainOrderByAndLimit()
+
 	return nil
+}
+
+// hasMainDistinct returns true if the main SELECT uses the DISTINCT keyword.
+func (m *SQLModifier) hasMainDistinct() bool {
+	selectPos := m.findMainSelectPosition()
+	if selectPos == -1 {
+		return false
+	}
+	afterSelect := strings.TrimSpace(m.query[selectPos+6:]) // skip "SELECT"
+	return strings.HasPrefix(strings.ToUpper(afterSelect), "DISTINCT")
+}
+
+// hasMainGroupBy returns true if the main query has a GROUP BY clause at the top level.
+func (m *SQLModifier) hasMainGroupBy() bool {
+	return m.findMainClausePosition("GROUP BY") != -1
+}
+
+// hasMainUnion returns true if the query has a UNION or UNION ALL clause at the top
+// level (not inside subqueries or CTEs).
+func (m *SQLModifier) hasMainUnion() bool {
+	queryUpper := strings.ToUpper(m.query)
+	re := regexp.MustCompile(`\bUNION\b`)
+	matches := re.FindAllStringIndex(queryUpper, -1)
+	for _, match := range matches {
+		pos := match[0]
+		queryBefore := m.query[:pos]
+		if strings.Count(queryBefore, "(") == strings.Count(queryBefore, ")") {
+			return true
+		}
+	}
+	return false
+}
+
+// stripMainOrderByAndLimit removes ORDER BY, LIMIT, and OFFSET clauses from the main
+// query. These clauses are meaningless in a count query and must be stripped to avoid
+// wrong results (e.g. LIMIT caps the count to 1 row, ORDER BY wastes resources).
+func (m *SQLModifier) stripMainOrderByAndLimit() {
+	cutPos := -1
+	for _, clause := range []string{"ORDER BY", "LIMIT", "OFFSET"} {
+		pos := m.findMainClausePosition(clause)
+		if pos != -1 && (cutPos == -1 || pos < cutPos) {
+			cutPos = pos
+		}
+	}
+	if cutPos != -1 {
+		m.query = strings.TrimSpace(m.query[:cutPos])
+	}
 }
 
 // AppendWhere appends a condition to the WHERE clause.

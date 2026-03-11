@@ -96,32 +96,93 @@ func TestNewCount(t *testing.T) {
 			query:    "SELECT id, (SELECT COUNT(*) FROM orders WHERE user_id = users.id) AS order_count FROM users",
 			expected: "select count(*) from users",
 		},
-		// GROUP BY
+		// GROUP BY — must wrap in subquery to return a scalar count of groups
 		{
-			name:     "group by preserved",
+			name:     "group by wraps in subquery",
 			query:    "SELECT category, COUNT(*) FROM products GROUP BY category",
-			expected: "select count(*) from products group by category",
+			expected: "select count(*) from (select category, count(*) from products group by category) kuysor_count",
 		},
 		{
-			name:     "group by and having preserved",
+			name:     "group by and having wraps in subquery",
 			query:    "SELECT category FROM products GROUP BY category HAVING COUNT(*) > 5",
-			expected: "select count(*) from products group by category having count(*) > 5",
-		},
-		// ORDER BY and LIMIT
-		{
-			name:     "order by and limit preserved",
-			query:    "SELECT id, name FROM users WHERE status = ? ORDER BY name LIMIT 10",
-			expected: "select count(*) from users where status = ? order by name limit 10",
+			expected: "select count(*) from (select category from products group by category having count(*) > 5) kuysor_count",
 		},
 		{
-			name:     "order by and limit offset preserved",
-			query:    "SELECT id FROM users ORDER BY id LIMIT 10 OFFSET 20",
-			expected: "select count(*) from users order by id limit 10 offset 20",
+			name:     "group by with order by and limit - stripped before wrapping",
+			query:    "SELECT department, COUNT(*) FROM employees GROUP BY department ORDER BY department LIMIT 10",
+			expected: "select count(*) from (select department, count(*) from employees group by department) kuysor_count",
 		},
-		// DISTINCT
 		{
-			name:     "distinct replaced with count",
+			name:     "CTE with group by in main query wraps inner select only",
+			query:    "WITH dept AS (SELECT id, name FROM departments) SELECT d.name, COUNT(*) FROM employees e JOIN dept d ON e.dept_id = d.id GROUP BY d.name",
+			expected: "with dept as (select id, name from departments) select count(*) from (select d.name, count(*) from employees e join dept d on e.dept_id = d.id group by d.name) kuysor_count",
+		},
+		// DISTINCT — must wrap to preserve distinctness; naive COUNT(*) overcounts
+		{
+			name:     "distinct wraps in subquery",
+			query:    "SELECT DISTINCT department FROM employees",
+			expected: "select count(*) from (select distinct department from employees) kuysor_count",
+		},
+		{
+			name:     "distinct multiple columns wraps in subquery",
 			query:    "SELECT DISTINCT id, name FROM users",
+			expected: "select count(*) from (select distinct id, name from users) kuysor_count",
+		},
+		{
+			name:     "distinct with order by - stripped before wrapping",
+			query:    "SELECT DISTINCT department FROM employees ORDER BY department",
+			expected: "select count(*) from (select distinct department from employees) kuysor_count",
+		},
+		{
+			name:     "distinct with where preserved inside subquery",
+			query:    "SELECT DISTINCT department FROM employees WHERE active = 1",
+			expected: "select count(*) from (select distinct department from employees where active = 1) kuysor_count",
+		},
+		// UNION / UNION ALL — must wrap; naive SELECT COUNT(*) FROM t1 UNION ... is broken
+		{
+			name:     "union wraps in subquery",
+			query:    "SELECT id FROM employees UNION SELECT id FROM contractors",
+			expected: "select count(*) from (select id from employees union select id from contractors) kuysor_count",
+		},
+		{
+			name:     "union all wraps in subquery",
+			query:    "SELECT id FROM employees UNION ALL SELECT id FROM contractors",
+			expected: "select count(*) from (select id from employees union all select id from contractors) kuysor_count",
+		},
+		{
+			name:     "union with order by - stripped before wrapping",
+			query:    "SELECT id, name FROM employees UNION ALL SELECT id, name FROM contractors ORDER BY name LIMIT 20",
+			expected: "select count(*) from (select id, name from employees union all select id, name from contractors) kuysor_count",
+		},
+		{
+			name:     "union inside subquery is not top-level - no wrapping",
+			query:    "SELECT * FROM (SELECT id FROM t1 UNION SELECT id FROM t2) AS sub",
+			expected: "select count(*) from (select id from t1 union select id from t2) as sub",
+		},
+		{
+			name:     "CTE with union in main query wraps inner select only",
+			query:    "WITH cte AS (SELECT id FROM t) SELECT id FROM cte UNION ALL SELECT id FROM other",
+			expected: "with cte as (select id from t) select count(*) from (select id from cte union all select id from other) kuysor_count",
+		},
+		// ORDER BY and LIMIT stripped for simple queries (no GROUP BY / DISTINCT / UNION)
+		{
+			name:     "order by stripped",
+			query:    "SELECT id, name FROM users WHERE status = ? ORDER BY name",
+			expected: "select count(*) from users where status = ?",
+		},
+		{
+			name:     "order by and limit stripped",
+			query:    "SELECT id, name FROM users WHERE status = ? ORDER BY name LIMIT 10",
+			expected: "select count(*) from users where status = ?",
+		},
+		{
+			name:     "order by and limit and offset stripped",
+			query:    "SELECT id FROM users ORDER BY id LIMIT 10 OFFSET 20",
+			expected: "select count(*) from users",
+		},
+		{
+			name:     "offset only stripped",
+			query:    "SELECT id FROM users OFFSET 20",
 			expected: "select count(*) from users",
 		},
 		// Placeholders
@@ -175,15 +236,21 @@ func TestNewCount(t *testing.T) {
 			expected:  "select count(id) from users",
 		},
 		{
-			name:     "already count with other columns - replaced with count only",
+			name:     "already count with other columns and group by - wraps in subquery",
 			query:    "SELECT COUNT(*), category FROM products GROUP BY category",
-			expected: "select count(*) from products group by category",
+			expected: "select count(*) from (select count(*), category from products group by category) kuysor_count",
 		},
 		// Complex query
 		{
-			name:     "full featured query",
-			query:    "WITH last_activity AS ( SELECT user_id, MAX(created_at) AS created_at FROM activity_log GROUP BY user_id ) SELECT u.id, u.name, la.created_at FROM users u LEFT JOIN last_activity la ON la.user_id = u.id WHERE u.status = ? AND u.deleted_at IS NULL GROUP BY u.id, u.name, la.created_at HAVING COUNT(*) > 0 ORDER BY u.name LIMIT 10",
-			expected: "with last_activity as ( select user_id, max(created_at) as created_at from activity_log group by user_id ) select count(*) from users u left join last_activity la on la.user_id = u.id where u.status = ? and u.deleted_at is null group by u.id, u.name, la.created_at having count(*) > 0 order by u.name limit 10",
+			name:  "full featured query - group by wraps, order by and limit stripped",
+			query: "WITH last_activity AS ( SELECT user_id, MAX(created_at) AS created_at FROM activity_log GROUP BY user_id ) SELECT u.id, u.name, la.created_at FROM users u LEFT JOIN last_activity la ON la.user_id = u.id WHERE u.status = ? AND u.deleted_at IS NULL GROUP BY u.id, u.name, la.created_at HAVING COUNT(*) > 0 ORDER BY u.name LIMIT 10",
+			expected: "with last_activity as ( select user_id, max(created_at) as created_at from activity_log group by user_id ) select count(*) from (select u.id, u.name, la.created_at from users u left join last_activity la on la.user_id = u.id where u.status = ? and u.deleted_at is null group by u.id, u.name, la.created_at having count(*) > 0) kuysor_count",
+		},
+		// CTE with group by only in CTE body (not in main query) — no wrapping
+		{
+			name:     "group by only inside CTE body - main query has no group by",
+			query:    "WITH agg AS (SELECT dept, COUNT(*) AS cnt FROM employees GROUP BY dept) SELECT dept, cnt FROM agg",
+			expected: "with agg as (select dept, count(*) as cnt from employees group by dept) select count(*) from agg",
 		},
 		// Errors
 		{
@@ -253,4 +320,3 @@ func TestNewCountUseColumnChaining(t *testing.T) {
 		t.Errorf("expected %q, got %q", expected, strings.ToLower(got))
 	}
 }
-
