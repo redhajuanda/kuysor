@@ -307,6 +307,168 @@ func TestNewCount(t *testing.T) {
 	}
 }
 
+func TestNewCountRemoveUnusedLeftJoins(t *testing.T) {
+	tests := []struct {
+		name     string
+		query    string
+		expected string
+	}{
+		{
+			name:     "single left join not in where - removed",
+			query:    "SELECT u.id, u.name, p.title FROM users u LEFT JOIN profiles p ON u.id = p.user_id",
+			expected: "select count(*) from users u",
+		},
+		{
+			name:     "single left join used in where - kept",
+			query:    "SELECT u.id, u.name FROM users u LEFT JOIN profiles p ON u.id = p.user_id WHERE p.verified = 1",
+			expected: "select count(*) from users u left join profiles p on u.id = p.user_id where p.verified = 1",
+		},
+		{
+			name:     "multiple left joins none in where - all removed",
+			query:    "SELECT u.id, p.name, a.url FROM users u LEFT JOIN profiles p ON u.id = p.user_id LEFT JOIN avatars a ON u.id = a.user_id",
+			expected: "select count(*) from users u",
+		},
+		{
+			name:     "multiple left joins one in where - only used one kept",
+			query:    "SELECT u.id FROM users u LEFT JOIN profiles p ON u.id = p.user_id LEFT JOIN avatars a ON u.id = a.user_id WHERE a.url IS NOT NULL",
+			expected: "select count(*) from users u left join avatars a on u.id = a.user_id where a.url is not null",
+		},
+		{
+			name:     "transitive dependency - both kept",
+			query:    "SELECT u.id FROM users u LEFT JOIN profiles p ON u.id = p.user_id LEFT JOIN avatars a ON p.id = a.profile_id WHERE a.url IS NOT NULL",
+			expected: "select count(*) from users u left join profiles p on u.id = p.user_id left join avatars a on p.id = a.profile_id where a.url is not null",
+		},
+		{
+			name:     "inner join preserved left join removed",
+			query:    "SELECT u.id FROM users u INNER JOIN orders o ON u.id = o.user_id LEFT JOIN profiles p ON u.id = p.user_id WHERE o.total > 100",
+			expected: "select count(*) from users u inner join orders o on u.id = o.user_id where o.total > 100",
+		},
+		{
+			name:     "left join between other joins - removed cleanly",
+			query:    "SELECT u.id FROM users u LEFT JOIN profiles p ON u.id = p.user_id INNER JOIN orders o ON u.id = o.user_id WHERE o.total > 100",
+			expected: "select count(*) from users u inner join orders o on u.id = o.user_id where o.total > 100",
+		},
+		{
+			name:     "no where clause - all left joins removed",
+			query:    "SELECT u.id, p.name FROM users u LEFT JOIN profiles p ON u.id = p.user_id",
+			expected: "select count(*) from users u",
+		},
+		{
+			name:     "left outer join not in where - removed",
+			query:    "SELECT u.id FROM users u LEFT OUTER JOIN profiles p ON u.id = p.user_id",
+			expected: "select count(*) from users u",
+		},
+		{
+			name:     "left join with order by and limit - all stripped",
+			query:    "SELECT u.id, p.name FROM users u LEFT JOIN profiles p ON u.id = p.user_id ORDER BY u.id LIMIT 10",
+			expected: "select count(*) from users u",
+		},
+		{
+			name:     "no left joins - query unchanged",
+			query:    "SELECT u.id FROM users u INNER JOIN orders o ON u.id = o.user_id WHERE o.total > 100",
+			expected: "select count(*) from users u inner join orders o on u.id = o.user_id where o.total > 100",
+		},
+		{
+			name:     "left join in subquery not affected",
+			query:    "SELECT id FROM (SELECT u.id, p.name FROM users u LEFT JOIN profiles p ON u.id = p.user_id) AS sub",
+			expected: "select count(*) from (select u.id, p.name from users u left join profiles p on u.id = p.user_id) as sub",
+		},
+		{
+			name:     "CTE with left join in main query - removed",
+			query:    "WITH active AS (SELECT id FROM users WHERE status = 1) SELECT a.id, p.name FROM active a LEFT JOIN profiles p ON a.id = p.user_id",
+			expected: "with active as (select id from users where status = 1) select count(*) from active a",
+		},
+		{
+			name:     "real world CTE with many left joins none in where - all removed",
+			query:    "WITH filtered_ticket AS ( SELECT t.id FROM ticket t WHERE t.deleted_at = 0 ) select t.id as id, t.code as ticket_code, t.name as ticket_name, t.customer_name as customer_name, t.issue_tag_id as issue_tag_id, team.name as team_name, assign.name as assign_name, t.is_fcr as is_fcr, t.hcp_id, t.ticket_category as ticket_category, t.ticket_type as ticket_type, t.created_at as created_at, t.closed_timestamp as closed_timestamp, t.assigned_to_timestamp as assign_to_branch_timestamp, t.stage as stage, csat.rating as csat_rating, t.number_ticket_vendor as number_ticket_vendor, tx_claim_status.indexed_property_4 as claim_payment_method, tx_claim_form.indexed_property_3 as jenis_pembayaran, CONCAT_WS(' - ', actor.code, actor.name) as created_by, JSON_EXTRACT(t.attribute, '$.aging_time') as aging_time from filtered_ticket ft left join ticket t on (t.id = ft.id) left join account team on (team.id = t.team_id) left join account assign on (assign.id = t.assigned_to_id) left join transaction tx_claim_form on ( tx_claim_form.number = t.id and tx_claim_form.transaction_type_id = '01JQ6FE2A5DRZCXNGJAAYY3XC0' ) left join transaction tx_claim_status on ( tx_claim_status.number = t.id and tx_claim_status.transaction_type_id = '01K82Z22M402866QBT5E8SQCCC' ) left join account actor on (actor.id = t.created_by) left join csat on csat.unique_id = t.number_ticket_vendor and csat.deleted_at = 0 where 1 = 1",
+			expected: "with filtered_ticket as ( select t.id from ticket t where t.deleted_at = 0 ) select count(*) from filtered_ticket ft where 1 = 1",
+		},
+		{
+			name:     "real world CTE with many left joins and group by - only needed joins kept",
+			query:    "WITH filtered_ticket AS ( SELECT t.id FROM ticket t WHERE t.deleted_at = 0 ) select t.id as id, t.code as ticket_code, t.name as ticket_name, t.customer_name as customer_name, t.issue_tag_id as issue_tag_id, team.name as team_name, assign.name as assign_name, t.is_fcr as is_fcr, t.hcp_id, t.ticket_category as ticket_category, t.ticket_type as ticket_type, t.created_at as created_at, t.closed_timestamp as closed_timestamp, t.assigned_to_timestamp as assign_to_branch_timestamp, t.stage as stage, csat.rating as csat_rating, t.number_ticket_vendor as number_ticket_vendor, tx_claim_status.indexed_property_4 as claim_payment_method, tx_claim_form.indexed_property_3 as jenis_pembayaran, CONCAT_WS(' - ', actor.code, actor.name) as created_by, JSON_EXTRACT(t.attribute, '$.aging_time') as aging_time from filtered_ticket ft left join ticket t on (t.id = ft.id) left join account team on (team.id = t.team_id) left join account assign on (assign.id = t.assigned_to_id) left join transaction tx_claim_form on ( tx_claim_form.number = t.id and tx_claim_form.transaction_type_id = '01JQ6FE2A5DRZCXNGJAAYY3XC0' ) left join transaction tx_claim_status on ( tx_claim_status.number = t.id and tx_claim_status.transaction_type_id = '01K82Z22M402866QBT5E8SQCCC' ) left join account actor on (actor.id = t.created_by) left join csat on csat.unique_id = t.number_ticket_vendor and csat.deleted_at = 0 where 1 = 1 GROUP BY t.id",
+			expected: "with filtered_ticket as ( select t.id from ticket t where t.deleted_at = 0 ) select count(*) from (select t.id as id, t.code as ticket_code, t.name as ticket_name, t.customer_name as customer_name, t.issue_tag_id as issue_tag_id, t.is_fcr as is_fcr, t.hcp_id, t.ticket_category as ticket_category, t.ticket_type as ticket_type, t.created_at as created_at, t.closed_timestamp as closed_timestamp, t.assigned_to_timestamp as assign_to_branch_timestamp, t.stage as stage, t.number_ticket_vendor as number_ticket_vendor, json_extract(t.attribute, '$.aging_time') as aging_time from filtered_ticket ft left join ticket t on (t.id = ft.id) where 1 = 1 group by t.id) kuysor_count",
+		},
+		{
+			name:     "group by with left join alias in group by - kept",
+			query:    "SELECT p.category, COUNT(*) FROM products pr LEFT JOIN categories p ON pr.cat_id = p.id GROUP BY p.category",
+			expected: "select count(*) from (select p.category, count(*) from products pr left join categories p on pr.cat_id = p.id group by p.category) kuysor_count",
+		},
+		{
+			name:     "group by with left join alias in having - kept",
+			query:    "SELECT pr.id FROM products pr LEFT JOIN categories p ON pr.cat_id = p.id GROUP BY pr.id HAVING COUNT(p.id) > 0",
+			expected: "select count(*) from (select pr.id from products pr left join categories p on pr.cat_id = p.id group by pr.id having count(p.id) > 0) kuysor_count",
+		},
+		{
+			name:     "group by with unused left join - removed",
+			query:    "SELECT u.dept, COUNT(*) FROM users u LEFT JOIN profiles p ON u.id = p.user_id GROUP BY u.dept",
+			expected: "select count(*) from (select u.dept, count(*) from users u group by u.dept) kuysor_count",
+		},
+		{
+			name:     "table name used directly without alias - not in where removed",
+			query:    "SELECT users.id, profiles.name FROM users LEFT JOIN profiles ON users.id = profiles.user_id",
+			expected: "select count(*) from users",
+		},
+		{
+			name:     "table name used directly - in where kept",
+			query:    "SELECT users.id FROM users LEFT JOIN profiles ON users.id = profiles.user_id WHERE profiles.verified = 1",
+			expected: "select count(*) from users left join profiles on users.id = profiles.user_id where profiles.verified = 1",
+		},
+		// Alias with AS keyword
+		{
+			name:     "alias with AS - not in where removed",
+			query:    "SELECT u.id, p.name FROM users u LEFT JOIN profiles AS p ON u.id = p.user_id",
+			expected: "select count(*) from users u",
+		},
+		{
+			name:     "alias with AS - used in where kept",
+			query:    "SELECT u.id FROM users u LEFT JOIN profiles AS p ON u.id = p.user_id WHERE p.verified = 1",
+			expected: "select count(*) from users u left join profiles as p on u.id = p.user_id where p.verified = 1",
+		},
+		// Table name referenced in WHERE instead of alias
+		{
+			name:     "where uses table name instead of alias - kept",
+			query:    "SELECT u.id FROM users u LEFT JOIN profiles p ON u.id = p.user_id WHERE profiles.verified = 1",
+			expected: "select count(*) from users u left join profiles p on u.id = p.user_id where profiles.verified = 1",
+		},
+		{
+			name:     "where uses table name instead of AS alias - kept",
+			query:    "SELECT u.id FROM users u LEFT JOIN profiles AS p ON u.id = p.user_id WHERE profiles.verified = 1",
+			expected: "select count(*) from users u left join profiles as p on u.id = p.user_id where profiles.verified = 1",
+		},
+		// Group by uses table name instead of alias
+		{
+			name:     "group by uses table name instead of alias - kept",
+			query:    "SELECT p.category FROM products LEFT JOIN categories AS p ON products.cat_id = p.id GROUP BY categories.category",
+			expected: "select count(*) from (select p.category from products left join categories as p on products.cat_id = p.id group by categories.category) kuysor_count",
+		},
+		// Multiple left joins with mixed alias styles
+		{
+			name:     "mixed alias styles - AS and without AS",
+			query:    "SELECT u.id FROM users u LEFT JOIN profiles AS p ON u.id = p.user_id LEFT JOIN avatars a ON u.id = a.user_id LEFT JOIN settings AS s ON u.id = s.user_id WHERE p.verified = 1",
+			expected: "select count(*) from users u left join profiles as p on u.id = p.user_id where p.verified = 1",
+		},
+		// Transitive dependency with table name in where
+		{
+			name:     "transitive dependency via table name in where",
+			query:    "SELECT u.id FROM users u LEFT JOIN profiles p ON u.id = p.user_id LEFT JOIN avatars a ON p.id = a.profile_id WHERE avatars.url IS NOT NULL",
+			expected: "select count(*) from users u left join profiles p on u.id = p.user_id left join avatars a on p.id = a.profile_id where avatars.url is not null",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := NewCount(tt.query).RemoveUnusedLeftJoins().Build()
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			gotLower := strings.ToLower(got)
+			if gotLower != tt.expected {
+				t.Errorf("expected %q, got %q", tt.expected, gotLower)
+			}
+		})
+	}
+}
+
 func TestNewCountUseColumnChaining(t *testing.T) {
 	// Last UseColumn wins
 	query := "SELECT id FROM users"

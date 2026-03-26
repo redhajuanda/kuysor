@@ -18,8 +18,9 @@ const (
 // It replaces only the main query's SELECT clause (not in subqueries or CTEs)
 // with count(*), count(1), or count(column).
 type Count struct {
-	query string
-	expr  string
+	query             string
+	expr              string
+	removeUnusedJoins bool
 }
 
 // NewCount creates a new Count instance for converting a query to a count query.
@@ -42,9 +43,20 @@ func (c *Count) UseColumn(expr string) *Count {
 	return c
 }
 
+// RemoveUnusedLeftJoins enables removal of LEFT JOIN clauses whose table/alias
+// is not referenced in the WHERE clause. This optimizes count queries by
+// eliminating unnecessary joins that don't affect filtering.
+func (c *Count) RemoveUnusedLeftJoins() *Count {
+	c.removeUnusedJoins = true
+	return c
+}
+
 // Build converts the query to a count query and returns the result.
 func (c *Count) Build() (string, error) {
 	m := modifier.NewSQLModifier(c.query)
+	if c.removeUnusedJoins {
+		m.StripUnusedLeftJoins()
+	}
 	if err := m.ConvertToCountExpr(c.expr); err != nil {
 		return "", fmt.Errorf("failed to convert to count query: %w", err)
 	}

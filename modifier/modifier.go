@@ -3,6 +3,7 @@ package modifier
 import (
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -583,6 +584,301 @@ func (m *SQLModifier) setOffsetInternal(newOffset string) {
 			return
 		}
 	}
+}
+
+// StripUnusedLeftJoins removes main-level LEFT JOIN clauses whose table/alias
+// is not referenced in the WHERE, GROUP BY, or HAVING clauses. LEFT JOINs that
+// are transitively needed (referenced in ON clauses of other needed LEFT JOINs)
+// are kept. SELECT columns referencing removed aliases are also cleaned up.
+func (m *SQLModifier) StripUnusedLeftJoins() {
+	// Collect clause texts that determine whether a LEFT JOIN alias is "needed".
+	// An alias is needed if it appears in WHERE, GROUP BY, or HAVING.
+	var clauseTextsUpper []string
+	for _, clause := range []struct {
+		keyword    string
+		terminators []string
+	}{
+		{"WHERE", []string{"GROUP BY", "HAVING", "ORDER BY", "LIMIT", "OFFSET"}},
+		{"GROUP BY", []string{"HAVING", "ORDER BY", "LIMIT", "OFFSET"}},
+		{"HAVING", []string{"ORDER BY", "LIMIT", "OFFSET"}},
+	} {
+		pos := m.findMainClausePosition(clause.keyword)
+		if pos == -1 {
+			continue
+		}
+		end := len(m.query)
+		for _, kw := range clause.terminators {
+			if p := m.findMainClausePosition(kw); p != -1 && p > pos && p < end {
+				end = p
+			}
+		}
+		clauseTextsUpper = append(clauseTextsUpper, strings.ToUpper(m.query[pos:end]))
+	}
+
+	// Find all main-level LEFT [OUTER] JOIN positions.
+	ljRe := regexp.MustCompile(`(?i)\bLEFT\s+(?:OUTER\s+)?JOIN\b`)
+	allMatches := ljRe.FindAllStringIndex(m.query, -1)
+	mainSelectPos := m.findMainSelectPosition()
+
+	type ljEntry struct {
+		start     int      // position of "LEFT" keyword
+		kwEnd     int      // end of "LEFT [OUTER] JOIN" keyword
+		end       int      // end of the entire LEFT JOIN clause (ON condition inclusive)
+		tableName string   // table name (e.g. "ticket" in "LEFT JOIN ticket t")
+		alias     string   // alias if present, otherwise same as tableName
+		idents    []string // all identifiers to check (uppercase): [alias] or [tableName, alias]
+		onUpper   string   // ON clause text (uppercase) for dependency analysis
+	}
+
+	var entries []ljEntry
+	for _, match := range allMatches {
+		pos := match[0]
+		if mainSelectPos != -1 && pos < mainSelectPos {
+			continue
+		}
+		before := m.query[:pos]
+		if strings.Count(before, "(") != strings.Count(before, ")") {
+			continue
+		}
+		entries = append(entries, ljEntry{start: pos, kwEnd: match[1]})
+	}
+
+	if len(entries) == 0 {
+		return
+	}
+
+	// Find all main-level clause boundary positions to determine ON clause extents.
+	joinRe := regexp.MustCompile(`(?i)\b(?:(?:LEFT|RIGHT|FULL)\s+(?:OUTER\s+)?|INNER\s+|CROSS\s+)?JOIN\b`)
+	clauseRe := regexp.MustCompile(`(?i)\b(?:WHERE|GROUP\s+BY|HAVING|ORDER\s+BY|LIMIT|OFFSET|UNION(?:\s+ALL)?)\b`)
+	var boundaries []int
+	for _, re := range []*regexp.Regexp{joinRe, clauseRe} {
+		for _, match := range re.FindAllStringIndex(m.query, -1) {
+			pos := match[0]
+			if mainSelectPos != -1 && pos < mainSelectPos {
+				continue
+			}
+			before := m.query[:pos]
+			if strings.Count(before, "(") == strings.Count(before, ")") {
+				boundaries = append(boundaries, pos)
+			}
+		}
+	}
+	sort.Ints(boundaries)
+
+	// For each LEFT JOIN, find its alias and ON clause extent.
+	onRe := regexp.MustCompile(`(?i)\bON\b`)
+	validCount := 0
+	for i := range entries {
+		// Find the ON keyword after this LEFT JOIN keyword.
+		onMatches := onRe.FindAllStringIndex(m.query[entries[i].kwEnd:], -1)
+		onAbsPos := -1
+		for _, om := range onMatches {
+			candidate := entries[i].kwEnd + om[0]
+			before := m.query[:candidate]
+			if strings.Count(before, "(") == strings.Count(before, ")") {
+				onAbsPos = candidate
+				break
+			}
+		}
+		if onAbsPos == -1 {
+			continue
+		}
+
+		// Extract table name and alias between LEFT JOIN keyword end and ON.
+		// Patterns: "table alias", "table AS alias", "table" (no alias),
+		//           "(subquery) alias", "(subquery) AS alias"
+		between := strings.TrimSpace(m.query[entries[i].kwEnd:onAbsPos])
+		words := strings.Fields(between)
+		if len(words) == 0 {
+			continue
+		}
+
+		alias := strings.Trim(words[len(words)-1], "`\"[]")
+		tableName := strings.Trim(words[0], "`\"[]")
+
+		// For subqueries, the first word starts with "(" — skip table name tracking.
+		if strings.HasPrefix(words[0], "(") {
+			tableName = ""
+		}
+
+		// Build list of identifiers to match against clauses.
+		var idents []string
+		aliasUpper := strings.ToUpper(alias)
+		tableUpper := strings.ToUpper(tableName)
+		idents = append(idents, aliasUpper)
+		if tableUpper != "" && tableUpper != aliasUpper {
+			idents = append(idents, tableUpper)
+		}
+
+		// Find end of this LEFT JOIN clause: next boundary after onAbsPos
+		// that is not this LEFT JOIN's own start position.
+		clauseEnd := len(m.query)
+		for _, bp := range boundaries {
+			if bp > onAbsPos && bp != entries[i].start {
+				clauseEnd = bp
+				break
+			}
+		}
+
+		entries[i].end = clauseEnd
+		entries[i].tableName = tableName
+		entries[i].alias = alias
+		entries[i].idents = idents
+		entries[i].onUpper = strings.ToUpper(m.query[onAbsPos:clauseEnd])
+		validCount++
+	}
+
+	// Filter out entries that couldn't be parsed.
+	valid := make([]ljEntry, 0, validCount)
+	for _, e := range entries {
+		if e.alias != "" {
+			valid = append(valid, e)
+		}
+	}
+
+	if len(valid) == 0 {
+		return
+	}
+
+	// Mark entries as needed if any of their identifiers appear in WHERE, GROUP BY, or HAVING.
+	neededEntry := make([]bool, len(valid))
+	for i, e := range valid {
+		for _, id := range e.idents {
+			re := regexp.MustCompile(`\b` + regexp.QuoteMeta(id) + `\b`)
+			for _, text := range clauseTextsUpper {
+				if re.MatchString(text) {
+					neededEntry[i] = true
+					break
+				}
+			}
+			if neededEntry[i] {
+				break
+			}
+		}
+	}
+
+	// Propagate: if a needed LEFT JOIN's ON clause references another
+	// LEFT JOIN's identifier, that entry is transitively needed.
+	for changed := true; changed; {
+		changed = false
+		for i, isNeeded := range neededEntry {
+			if !isNeeded {
+				continue
+			}
+			for j, e := range valid {
+				if neededEntry[j] {
+					continue
+				}
+				for _, id := range e.idents {
+					re := regexp.MustCompile(`\b` + regexp.QuoteMeta(id) + `\b`)
+					if re.MatchString(valid[i].onUpper) {
+						neededEntry[j] = true
+						changed = true
+						break
+					}
+				}
+			}
+		}
+	}
+
+	// Collect removed identifiers (both table name and alias).
+	removedAliases := make(map[string]bool)
+	for i, e := range valid {
+		if !neededEntry[i] {
+			for _, id := range e.idents {
+				removedAliases[id] = true
+			}
+		}
+	}
+
+	if len(removedAliases) == 0 {
+		return
+	}
+
+	// Remove unneeded LEFT JOINs from end to start to preserve positions.
+	for i := len(valid) - 1; i >= 0; i-- {
+		if !neededEntry[i] {
+			before := strings.TrimRight(m.query[:valid[i].start], " \t\n\r")
+			after := m.query[valid[i].end:]
+			m.query = before + " " + strings.TrimLeft(after, " \t\n\r")
+		}
+	}
+	m.query = strings.TrimSpace(m.query)
+
+	// Clean up SELECT columns that reference removed aliases.
+	m.cleanSelectForRemovedAliases(removedAliases)
+}
+
+// cleanSelectForRemovedAliases removes SELECT column expressions that reference
+// any of the given aliases. If all columns are removed, replaces with "1".
+func (m *SQLModifier) cleanSelectForRemovedAliases(removedAliases map[string]bool) {
+	selectPos := m.findMainSelectPosition()
+	fromPos := m.findMainClausePosition("FROM")
+	if selectPos == -1 || fromPos == -1 {
+		return
+	}
+
+	selectKeywordEnd := selectPos + 6 // len("SELECT")
+	afterSelect := strings.TrimSpace(m.query[selectKeywordEnd:fromPos])
+
+	// Preserve DISTINCT keyword if present.
+	prefix := "SELECT "
+	if strings.HasPrefix(strings.ToUpper(afterSelect), "DISTINCT") {
+		prefix = "SELECT DISTINCT "
+		afterSelect = strings.TrimSpace(afterSelect[8:])
+	}
+
+	// Split column expressions on commas, respecting parentheses.
+	cols := splitOnTopLevelComma(afterSelect)
+
+	// Filter out columns that reference removed aliases.
+	var kept []string
+	for _, col := range cols {
+		colUpper := strings.ToUpper(col)
+		referencesRemoved := false
+		for alias := range removedAliases {
+			re := regexp.MustCompile(`\b` + regexp.QuoteMeta(alias) + `\b`)
+			if re.MatchString(colUpper) {
+				referencesRemoved = true
+				break
+			}
+		}
+		if !referencesRemoved {
+			kept = append(kept, col)
+		}
+	}
+
+	if len(kept) == 0 {
+		kept = []string{"1"}
+	}
+
+	// Reconstruct the query with cleaned SELECT.
+	newSelect := prefix + strings.Join(kept, ", ") + " "
+	m.query = m.query[:selectPos] + newSelect + m.query[fromPos:]
+}
+
+// splitOnTopLevelComma splits a string on commas that are not inside parentheses.
+func splitOnTopLevelComma(s string) []string {
+	var result []string
+	depth := 0
+	start := 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+		case ',':
+			if depth == 0 {
+				result = append(result, strings.TrimSpace(s[start:i]))
+				start = i + 1
+			}
+		}
+	}
+	if trimmed := strings.TrimSpace(s[start:]); trimmed != "" {
+		result = append(result, trimmed)
+	}
+	return result
 }
 
 // Build returns the normalized SQL query
