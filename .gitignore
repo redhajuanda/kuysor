@@ -20,3 +20,5 @@ current.txt
 # OS files
 .DS_Store
 Thumbs.db
+
+debug6_test.go

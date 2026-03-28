@@ -458,6 +458,17 @@ func TestNewCountRemoveUnusedLeftJoins(t *testing.T) {
 			query:    "SELECT u.id FROM users u LEFT JOIN profiles p ON u.id = p.user_id LEFT JOIN avatars a ON p.id = a.profile_id WHERE avatars.url IS NOT NULL",
 			expected: "select count(*) from users u left join profiles p on u.id = p.user_id left join avatars a on p.id = a.profile_id where avatars.url is not null",
 		},
+		// Regression: extra whitespace between last LEFT JOIN and WHERE must not corrupt WHERE
+		{
+			name:     "extra whitespace between joins and where - where preserved",
+			query:    "SELECT u.id, p.name FROM users u LEFT JOIN profiles p ON u.id = p.user_id LEFT JOIN avatars a ON u.id = a.user_id      where 1 = 1",
+			expected: "select count(*) from users u where 1 = 1",
+		},
+		{
+			name:     "template whitespace - many left joins with trailing spaces",
+			query:    "WITH ft AS ( SELECT t.id FROM ticket t WHERE t.deleted_at = 0 )  select  t.id as id,  team.name as team_name,  assign.name as assign_name,  csat.rating as csat_rating,  actor.code as created_by from ft left join ticket t on (t.id = ft.id) left join account team on (team.id = t.team_id) left join account assign on (assign.id = t.assigned_to_id)  left join account actor on (actor.id = t.created_by) left join csat on csat.unique_id = t.number_ticket_vendor and csat.deleted_at = 0      where 1 = 1   ",
+			expected: "with ft as ( select t.id from ticket t where t.deleted_at = 0 ) select count(*) from ft where 1 = 1",
+		},
 	}
 
 	for _, tt := range tests {

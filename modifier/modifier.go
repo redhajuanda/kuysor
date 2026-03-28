@@ -796,11 +796,12 @@ func (m *SQLModifier) StripUnusedLeftJoins() {
 	}
 
 	// Remove unneeded LEFT JOINs from end to start to preserve positions.
+	// Do not trim whitespace here — TrimRight/TrimLeft would shift character
+	// positions and corrupt subsequent removals that rely on pre-computed offsets.
+	// Extra whitespace is cleaned up by normalizeSQL in Build().
 	for i := len(valid) - 1; i >= 0; i-- {
 		if !neededEntry[i] {
-			before := strings.TrimRight(m.query[:valid[i].start], " \t\n\r")
-			after := m.query[valid[i].end:]
-			m.query = before + " " + strings.TrimLeft(after, " \t\n\r")
+			m.query = m.query[:valid[i].start] + m.query[valid[i].end:]
 		}
 	}
 	m.query = strings.TrimSpace(m.query)
