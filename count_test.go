@@ -60,14 +60,19 @@ func TestNewCount(t *testing.T) {
 			expected: "select count(*) from users u inner join profiles p on u.id = p.user_id",
 		},
 		{
-			name:     "left join preserved",
+			name:     "left join unused - auto removed",
 			query:    "SELECT u.id, u.name FROM users u LEFT JOIN profiles p ON u.id = p.user_id WHERE u.status = 'active'",
-			expected: "select count(*) from users u left join profiles p on u.id = p.user_id where u.status = 'active'",
+			expected: "select count(*) from users u where u.status = 'active'",
 		},
 		{
-			name:     "multiple joins preserved",
+			name:     "left join used in where - kept",
+			query:    "SELECT u.id, u.name FROM users u LEFT JOIN profiles p ON u.id = p.user_id WHERE p.verified = 1",
+			expected: "select count(*) from users u left join profiles p on u.id = p.user_id where p.verified = 1",
+		},
+		{
+			name:     "multiple left joins no where - all removed",
 			query:    "SELECT u.id, u.name, p.title, c.name FROM users u LEFT JOIN profiles p ON u.id = p.user_id LEFT JOIN companies c ON u.company_id = c.id",
-			expected: "select count(*) from users u left join profiles p on u.id = p.user_id left join companies c on u.company_id = c.id",
+			expected: "select count(*) from users u",
 		},
 		// CTE
 		{
@@ -457,7 +462,7 @@ func TestNewCountRemoveUnusedLeftJoins(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := NewCount(tt.query).RemoveUnusedLeftJoins().Build()
+			got, err := NewCount(tt.query).Build()
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
