@@ -41,6 +41,36 @@ type CTEOptions struct {
 	LimitOffset CTETargetMode
 	// Where controls where the cursor WHERE clause is injected.
 	Where CTETargetMode
+	// ColumnMap remaps the order-by column used inside the CTE body only, for
+	// both the ORDER BY and the cursor WHERE clause. It is keyed by the original
+	// order-by column (as passed to WithOrderBy, without the +/- prefix) and maps
+	// to the column/expression to emit inside the CTE. The main query always keeps
+	// the original column. Sort direction, LIMIT/OFFSET, and cursor values are
+	// unaffected — only the rendered column text changes inside the CTE.
+	//
+	// Example: WithOrderBy("-t.id") + ColumnMap{"t.id": "id"} renders
+	// "ORDER BY id DESC" / "id < ?" inside the CTE while the main query keeps
+	// "t.id". A nil map leaves all behavior unchanged.
+	ColumnMap map[string]string
+}
+
+// cteColumnMap returns the per-CTE column remap, or nil when unset.
+func cteColumnMap(opts *CTEOptions) map[string]string {
+	if opts == nil {
+		return nil
+	}
+	return opts.ColumnMap
+}
+
+// renderColumn returns the column to emit, applying the CTE column remap when
+// present. An unmapped column (or nil map) is returned unchanged.
+func renderColumn(column string, m map[string]string) string {
+	if m != nil {
+		if mapped, ok := m[column]; ok {
+			return mapped
+		}
+	}
+	return column
 }
 
 // effectiveOrderByMode returns the resolved ORDER BY routing mode.

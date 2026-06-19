@@ -161,6 +161,42 @@ func (p *Kuysor) WithCTETarget(cteName string, opts ...CTEOptions) *Kuysor {
 
 }
 
+// WithCTESecondaryTarget registers an ADDITIONAL CTE whose body also receives the
+// cursor WHERE, ORDER BY, and LIMIT — on top of the primary WithCTETarget. Use it
+// for stacked CTEs where an upstream id-gathering CTE (e.g. a UNION of ownership
+// lookups) should be capped early as well as the primary filtering CTE.
+//
+// Constraints:
+//   - A primary WithCTETarget must also be set.
+//   - The secondary CTE must be defined BEFORE the primary CTE in the WITH clause
+//     (its injected placeholders must appear earlier in the SQL string).
+//   - Only opts.ColumnMap is honored; the clauses are always injected into the CTE
+//     body (never mirrored on the main query). For a UNION CTE body the union is
+//     auto-wrapped in a derived table, so the column must reference the union's
+//     output column (use ColumnMap, e.g. {"t.id": "id"}).
+//
+// May be called multiple times; register secondaries in WITH-clause order.
+func (p *Kuysor) WithCTESecondaryTarget(cteName string, opts ...CTEOptions) *Kuysor {
+
+	if p.uTabling == nil {
+		p.uTabling = &uTabling{}
+	}
+
+	if p.uTabling.uPaging == nil {
+		p.uTabling.uPaging = &uPaging{}
+	}
+
+	var o *CTEOptions
+	if len(opts) > 0 {
+		o = &opts[0]
+	}
+
+	p.uTabling.uPaging.SecondaryCTEs = append(p.uTabling.uPaging.SecondaryCTEs, secondaryCTE{name: cteName, options: o})
+
+	return p
+
+}
+
 // WithNullSortMethod sets the null sort method for the query.
 // It is useful when you want to override the instance options or the global options.
 func (p *Kuysor) WithNullSortMethod(method NullSortMethod) *Kuysor {

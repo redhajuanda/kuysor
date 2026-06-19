@@ -75,12 +75,27 @@ func (m *SQLModifier) applyToCTEBody(fn func(sub *SQLModifier)) error {
 	}
 
 	sub := &SQLModifier{query: strings.TrimSpace(m.query[start:end])}
+
+	// When the CTE body is a top-level UNION, a directly-appended WHERE would only
+	// attach to the first branch, and a trailing ORDER BY/LIMIT can only reference
+	// the union's output column names. Wrap the union in a derived table so the
+	// injected WHERE / ORDER BY / LIMIT apply to the union result as a whole.
+	// After this wrap the body is no longer a top-level union, so repeated calls
+	// (one per clause) wrap at most once.
+	if sub.hasMainUnion() {
+		sub.query = "SELECT * FROM ( " + sub.query + " ) " + cteUnionWrapAlias
+	}
+
 	fn(sub)
 
 	// splice the modified body back (preserve surrounding whitespace layout)
 	m.query = m.query[:start] + sub.query + m.query[end:]
 	return nil
 }
+
+// cteUnionWrapAlias is the derived-table alias used when a UNION CTE body is
+// wrapped so that injected clauses apply to the union result as a whole.
+const cteUnionWrapAlias = "kuysor_cte_union"
 
 // findMainClausePosition finds the position of a main clause (not in subqueries/CTEs)
 // Returns the position of the clause keyword, or -1 if not found

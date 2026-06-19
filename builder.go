@@ -88,6 +88,21 @@ func (b *builder) handlePaginationCursor() (err error) {
 		cursorArgs []any
 	)
 
+	// Inject secondary CTE bodies first. They are defined before the primary CTE
+	// in the WITH clause, so their cursor WHERE / ORDER BY / LIMIT placeholders
+	// appear earliest in the SQL string and their args must be appended first.
+	// ORDER BY uses the same (possibly reversed) sort direction and limit+1 as the
+	// primary; the cursor WHERE is only applied beyond the first page.
+	if b.hasSecondaryCTEs() && b.ks.vTabling.vSorts != nil {
+		secSorts := *b.ks.vTabling.vSorts
+		if vCursor != nil && vCursor.Prefix.isPrev() {
+			secSorts = b.ks.vTabling.vSorts.reverseDirection()
+		}
+		if err = b.applySecondaryCTEs(secSorts, b.ks.uTabling.uPaging.Limit+1, vCursor != nil && vCursor.cursor != ""); err != nil {
+			return err
+		}
+	}
+
 	// if cursor is not empty, it means it is not the first page
 	// so we need to apply where clause
 	if vCursor != nil && vCursor.cursor != "" {
@@ -135,6 +150,16 @@ func (b *builder) handlePaginationOffset() (err error) {
 		vOffset = b.ks.vTabling.vOffset
 		vSorts  = b.ks.vTabling.vSorts
 	)
+
+	// Inject secondary CTE bodies first (defined before the primary CTE). For
+	// offset pagination secondaries receive ORDER BY + LIMIT only (no OFFSET, no
+	// WHERE) as a coarse early cap; the primary CTE/main query still applies the
+	// exact offset window. Requires an ORDER BY (the column the LIMIT is meaningful on).
+	if b.hasSecondaryCTEs() && vSorts != nil {
+		if err = b.applySecondaryCTEs(*vSorts, b.ks.uTabling.uPaging.Limit, false); err != nil {
+			return err
+		}
+	}
 
 	// When LIMIT/OFFSET mode is CTETargetModeBoth we must interleave args in
 	// string-position order: CTE_LIMIT, CTE_OFFSET, main_LIMIT, main_OFFSET.
@@ -221,20 +246,12 @@ func (b *builder) handlePaginationOffsetBoth(vOffset *vOffset, vSorts *vSorts) e
 // applyWhere applies the where clause to the sql query.
 func (b *builder) applyWhere() (err error) {
 
-	exprs, err := b.constructExprs()
-	if err != nil {
-		return err
-	}
-
-	var condition string
-	if len(exprs) == 1 {
-		condition = exprs[0].Expression
-	} else {
-		condition = modifier.NewNestedCondition("OR", exprs...).Expression
-	}
-
 	// When no CTE target is set, always route to main query.
 	if b.ks.uTabling.uPaging.CTETarget == "" {
+		condition, err := b.buildCondition(nil, true)
+		if err != nil {
+			return err
+		}
 		return b.sqlMod.AppendWhere(condition)
 	}
 
@@ -242,26 +259,64 @@ func (b *builder) applyWhere() (err error) {
 	if b.ks.uTabling.uPaging.CTEOptions != nil {
 		opts = b.ks.uTabling.uPaging.CTEOptions
 	}
+	colMap := cteColumnMap(opts)
+
 	switch effectiveWhereMode(opts) {
 	case CTETargetModeCTE:
+		// CTE body uses the remapped column; this is the single arg-producing build.
+		condition, err := b.buildCondition(colMap, true)
+		if err != nil {
+			return err
+		}
 		return b.sqlMod.AppendWhere(condition)
 	case CTETargetModeMain:
-		return b.sqlMod.AppendWhereMain(condition)
-	case CTETargetModeBoth:
-		// Place the condition string in both locations. vArgs duplication for the
-		// second placement is handled by the caller (handlePaginationCursor) AFTER
-		// applyLimitAndSorts runs, to ensure vArgs order matches placeholder string order.
-		if err := b.sqlMod.AppendWhere(condition); err != nil {
+		condition, err := b.buildCondition(nil, true)
+		if err != nil {
 			return err
 		}
 		return b.sqlMod.AppendWhereMain(condition)
+	case CTETargetModeBoth:
+		// CTE placement uses the remapped column and produces the cursor args.
+		// Main placement keeps the original column and must NOT append args again —
+		// its args are re-appended by handlePaginationCursor AFTER applyLimitAndSorts
+		// runs, to keep vArgs aligned with placeholder string order. With a nil map
+		// both conditions are identical, preserving previous behavior exactly.
+		cteCond, err := b.buildCondition(colMap, true)
+		if err != nil {
+			return err
+		}
+		mainCond, err := b.buildCondition(nil, false)
+		if err != nil {
+			return err
+		}
+		if err := b.sqlMod.AppendWhere(cteCond); err != nil {
+			return err
+		}
+		return b.sqlMod.AppendWhereMain(mainCond)
 	}
 	return nil
 
 }
 
+// buildCondition constructs the cursor WHERE condition string. colMap (when
+// non-nil) remaps columns to their CTE-body equivalents; appendArgs controls
+// whether the cursor values are appended to vArgs (set false for a secondary
+// rendering of the same condition to avoid duplicating args).
+func (b *builder) buildCondition(colMap map[string]string, appendArgs bool) (string, error) {
+
+	exprs, err := b.constructExprs(colMap, appendArgs)
+	if err != nil {
+		return "", err
+	}
+
+	if len(exprs) == 1 {
+		return exprs[0].Expression, nil
+	}
+	return modifier.NewNestedCondition("OR", exprs...).Expression, nil
+}
+
 // constructExprs constructs the expressions.
-func (b *builder) constructExprs() (expr []modifier.SQLCondition, err error) {
+func (b *builder) constructExprs(colMap map[string]string, appendArgs bool) (expr []modifier.SQLCondition, err error) {
 
 	var (
 		vSorts  = b.ks.vTabling.vSorts
@@ -285,7 +340,7 @@ func (b *builder) constructExprs() (expr []modifier.SQLCondition, err error) {
 		if col != nil && vCursor.Prefix.isNext() && vSort.isNullable() && vSort.isAsc() ||
 			col != nil && vCursor.Prefix.isPrev() && vSort.isNullable() && vSort.isDesc() {
 			// construct IS NULL expression
-			e, err := b.constructIsExpr(&vSort, "NULL")
+			e, err := b.constructIsExpr(&vSort, "NULL", colMap)
 			if err != nil {
 				return nil, err
 			}
@@ -295,7 +350,7 @@ func (b *builder) constructExprs() (expr []modifier.SQLCondition, err error) {
 		if col == nil && vCursor.Prefix.isPrev() && vSort.nullable && vSort.isAsc() ||
 			col == nil && vCursor.Prefix.isNext() && vSort.nullable && vSort.isDesc() {
 			// construct IS NOT NULL expression
-			e, err := b.constructIsExpr(&vSort, "NOT NULL")
+			e, err := b.constructIsExpr(&vSort, "NOT NULL", colMap)
 			if err != nil {
 				return nil, err
 			}
@@ -321,13 +376,13 @@ func (b *builder) constructExprs() (expr []modifier.SQLCondition, err error) {
 				}
 
 				if col2 == nil {
-					e, err := b.constructIsExpr(&vSort2, "NULL")
+					e, err := b.constructIsExpr(&vSort2, "NULL", colMap)
 					if err != nil {
 						return nil, err
 					}
 					expr = append(expr, e)
 				} else {
-					e, err := b.constructCompExpr(&vSort2, "=")
+					e, err := b.constructCompExpr(&vSort2, "=", colMap, appendArgs)
 					if err != nil {
 						return nil, err
 					}
@@ -335,7 +390,7 @@ func (b *builder) constructExprs() (expr []modifier.SQLCondition, err error) {
 				}
 
 			} else {
-				e, err := b.constructCompExpr(&vSort2, operator)
+				e, err := b.constructCompExpr(&vSort2, operator, colMap, appendArgs)
 				if err != nil {
 					return nil, err
 				}
@@ -392,7 +447,10 @@ func (b *builder) getCursorValue(vSort *vSort) (col *string, err error) {
 }
 
 // constructCompExpr constructs the comparison expression.
-func (b *builder) constructCompExpr(vSort *vSort, operator string) (cnd modifier.SQLCondition, err error) {
+// colMap (when non-nil) remaps the rendered column for the CTE body; the cursor
+// value lookup still uses the original column. appendArgs controls whether the
+// cursor value is appended to vArgs (false when re-rendering the same condition).
+func (b *builder) constructCompExpr(vSort *vSort, operator string, colMap map[string]string, appendArgs bool) (cnd modifier.SQLCondition, err error) {
 
 	var (
 		vCursor = b.ks.vTabling.vCursor
@@ -404,23 +462,26 @@ func (b *builder) constructCompExpr(vSort *vSort, operator string) (cnd modifier
 		return modifier.SQLCondition{}, err
 	}
 
-	cnd = modifier.NewCondition(fmt.Sprintf("%s %s %s", vSort.column, operator, *col))
+	cnd = modifier.NewCondition(fmt.Sprintf("%s %s %s", renderColumn(vSort.column, colMap), operator, *col))
 
 	_, column, err := vSort.extractColumn()
 	if err != nil {
 		return modifier.SQLCondition{}, err
 	}
 
-	b.ks.vArgs = append(b.ks.vArgs, vCursor.Cols[column])
+	if appendArgs {
+		b.ks.vArgs = append(b.ks.vArgs, vCursor.Cols[column])
+	}
 
 	return cnd, nil
 
 }
 
 // constructIsExpr constructs the IS expression.
-func (b *builder) constructIsExpr(vSort *vSort, condition string) (expr modifier.SQLCondition, err error) {
+// colMap (when non-nil) remaps the rendered column for the CTE body.
+func (b *builder) constructIsExpr(vSort *vSort, condition string, colMap map[string]string) (expr modifier.SQLCondition, err error) {
 
-	expr = modifier.NewCondition(fmt.Sprintf("%s IS %s", vSort.column, condition))
+	expr = modifier.NewCondition(fmt.Sprintf("%s IS %s", renderColumn(vSort.column, colMap), condition))
 	return expr, nil
 
 }
@@ -562,14 +623,119 @@ func (b *builder) applyLimitAndSorts() error {
 
 }
 
+// hasSecondaryCTEs reports whether any secondary CTE targets are registered.
+func (b *builder) hasSecondaryCTEs() bool {
+	return b.ks.uTabling != nil && b.ks.uTabling.uPaging != nil && len(b.ks.uTabling.uPaging.SecondaryCTEs) > 0
+}
+
+// applySecondaryCTEs injects the cursor WHERE (when withCursor), LIMIT, and
+// ORDER BY into each registered secondary CTE body, in registration order. The
+// secondaries must be defined before the primary CTE in the WITH clause so that
+// these placeholders — appended to vArgs here, before the primary is processed —
+// stay aligned with their query-string positions. Each secondary's clauses are
+// confined to its CTE body (never mirrored on the main query); a UNION body is
+// auto-wrapped by the modifier, and ColumnMap remaps the injected column.
+func (b *builder) applySecondaryCTEs(vSorts vSorts, limit int, withCursor bool) error {
+
+	up := b.ks.uTabling.uPaging
+	if up == nil || len(up.SecondaryCTEs) == 0 {
+		return nil
+	}
+
+	// Secondaries are layered on top of a primary CTE target; without one there is
+	// no defined query-string ordering for the injected placeholders.
+	if up.CTETarget == "" {
+		return fmt.Errorf("WithCTESecondaryTarget requires a primary WithCTETarget")
+	}
+
+	// Restore the primary CTE as the modifier target on the way out so the primary
+	// pagination flow operates on the correct CTE.
+	restore := func() { b.sqlMod.SetCTETarget(up.CTETarget) }
+
+	for _, sec := range up.SecondaryCTEs {
+		colMap := cteColumnMap(sec.options)
+		b.sqlMod.SetCTETarget(sec.name)
+
+		// cursor WHERE (uses the original sort directions, like the primary)
+		if withCursor {
+			cond, err := b.buildCondition(colMap, true)
+			if err != nil {
+				restore()
+				return err
+			}
+			if err := b.sqlMod.AppendWhere(cond); err != nil {
+				restore()
+				return err
+			}
+		}
+
+		// LIMIT
+		if err := b.sqlMod.SetLimit(defaultInternalPlaceHolder); err != nil {
+			restore()
+			return err
+		}
+		b.ks.vArgs = append(b.ks.vArgs, limit)
+
+		// ORDER BY (CTE body only — not mirrored on main)
+		if err := b.sqlMod.SetOrderBy(orderClauses(&vSorts, colMap)...); err != nil {
+			restore()
+			return err
+		}
+	}
+
+	restore()
+	return nil
+}
+
 // applySorts applies the sorting to the sql query.
 // Routing is controlled by CTEOptions.OrderBy when a CTE target is active.
 // Default (no options): ORDER BY goes into CTE body AND is mirrored on main query.
 func (b *builder) applySorts(vSorts *vSorts) error {
 
+	// When no CTE target is set, always route ORDER BY to the main query.
+	if b.ks.uTabling == nil || b.ks.uTabling.uPaging == nil || b.ks.uTabling.uPaging.CTETarget == "" {
+		return b.sqlMod.SetOrderBy(orderClauses(vSorts, nil)...)
+	}
+
+	var opts *CTEOptions
+	if b.ks.uTabling.uPaging.CTEOptions != nil {
+		opts = b.ks.uTabling.uPaging.CTEOptions
+	}
+
+	// The CTE body uses the remapped column (when ColumnMap is set); the main
+	// query always keeps the original column. With a nil map both are identical,
+	// preserving previous behavior exactly.
+	cteClauses := orderClauses(vSorts, cteColumnMap(opts))
+	mainClauses := orderClauses(vSorts, nil)
+
+	switch effectiveOrderByMode(opts) {
+	case CTETargetModeCTE:
+		// ORDER BY goes into CTE body only — do NOT mirror on main query.
+		return b.sqlMod.SetOrderBy(cteClauses...)
+	case CTETargetModeMain:
+		// ORDER BY goes onto the main query only — skip the CTE body.
+		return b.sqlMod.SetMainOrderBy(mainClauses...)
+	case CTETargetModeBoth:
+		// ORDER BY goes into CTE body AND is mirrored on the main query (default).
+		if err := b.sqlMod.SetOrderBy(cteClauses...); err != nil {
+			return err
+		}
+		return b.sqlMod.SetMainOrderBy(mainClauses...)
+	}
+	return nil
+
+}
+
+// orderClauses renders the ORDER BY clause fragments for the given sorts.
+// colMap (when non-nil) remaps each column to its CTE-body equivalent; the
+// sort direction and null handling are unchanged.
+func orderClauses(vSorts *vSorts, colMap map[string]string) []string {
+
 	var clauses []string
 
 	for _, vSort := range *vSorts {
+
+		column := renderColumn(vSort.column, colMap)
 
 		var direction string
 		if vSort.isAsc() {
@@ -579,7 +745,7 @@ func (b *builder) applySorts(vSorts *vSorts) error {
 		}
 
 		if vSort.isNullable() && vSort.nullSortMethod == CaseWhen {
-			clauses = append(clauses, fmt.Sprintf("CASE WHEN %s IS NULL THEN 1 ELSE 0 END %s", vSort.column, direction))
+			clauses = append(clauses, fmt.Sprintf("CASE WHEN %s IS NULL THEN 1 ELSE 0 END %s", column, direction))
 		}
 
 		if vSort.isNullable() && vSort.nullSortMethod == FirstLast {
@@ -589,40 +755,16 @@ func (b *builder) applySorts(vSorts *vSorts) error {
 			} else {
 				lf = "FIRST"
 			}
-			clauses = append(clauses, fmt.Sprintf("%s %s NULLS %s", vSort.column, direction, lf))
+			clauses = append(clauses, fmt.Sprintf("%s %s NULLS %s", column, direction, lf))
 			continue
 		}
 
 		if vSort.isNullable() && vSort.nullSortMethod == BoolSort {
-			clauses = append(clauses, fmt.Sprintf("%s IS NULL %s", vSort.column, direction))
+			clauses = append(clauses, fmt.Sprintf("%s IS NULL %s", column, direction))
 		}
 
-		clauses = append(clauses, fmt.Sprintf("%s %s", vSort.column, direction))
+		clauses = append(clauses, fmt.Sprintf("%s %s", column, direction))
 	}
 
-	// When no CTE target is set, always route ORDER BY to the main query.
-	if b.ks.uTabling == nil || b.ks.uTabling.uPaging == nil || b.ks.uTabling.uPaging.CTETarget == "" {
-		return b.sqlMod.SetOrderBy(clauses...)
-	}
-
-	var opts *CTEOptions
-	if b.ks.uTabling.uPaging.CTEOptions != nil {
-		opts = b.ks.uTabling.uPaging.CTEOptions
-	}
-	switch effectiveOrderByMode(opts) {
-	case CTETargetModeCTE:
-		// ORDER BY goes into CTE body only — do NOT mirror on main query.
-		return b.sqlMod.SetOrderBy(clauses...)
-	case CTETargetModeMain:
-		// ORDER BY goes onto the main query only — skip the CTE body.
-		return b.sqlMod.SetMainOrderBy(clauses...)
-	case CTETargetModeBoth:
-		// ORDER BY goes into CTE body AND is mirrored on the main query (default).
-		if err := b.sqlMod.SetOrderBy(clauses...); err != nil {
-			return err
-		}
-		return b.sqlMod.SetMainOrderBy(clauses...)
-	}
-	return nil
-
+	return clauses
 }

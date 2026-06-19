@@ -651,15 +651,15 @@ func TestCTETargetOptions(t *testing.T) {
 	}
 
 	tests := []struct {
-		name            string
-		opts            CTEOptions
-		paginationType  PaginationType
-		cursor          string
-		wantCTEHas      []string
-		wantCTENotHas   []string
-		wantMainHas     []string
-		wantMainNotHas  []string
-		wantArgs        []any
+		name           string
+		opts           CTEOptions
+		paginationType PaginationType
+		cursor         string
+		wantCTEHas     []string
+		wantCTENotHas  []string
+		wantMainHas    []string
+		wantMainNotHas []string
+		wantArgs       []any
 	}{
 		{
 			name:           "default (no options) — ORDER BY both, LIMIT/cursor WHERE in CTE",
@@ -819,5 +819,413 @@ func TestCTETargetOptions(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestCTEColumnMapCursorNext verifies that CTEOptions.ColumnMap remaps the
+// order-by column inside the CTE body (ORDER BY and cursor WHERE) while the
+// main query keeps the original column. Direction, limit, and cursor value
+// are unchanged.
+func TestCTEColumnMapCursorNext(t *testing.T) {
+	// cursor: {"prefix":"next","cols":{"id":"100"}}
+	cursor := base64Encode(`{"prefix":"next","cols":{"id":"100"}}`)
+
+	query := `
+		WITH filtered_ticket AS (
+			SELECT t.id FROM ticket t
+			WHERE t.deleted_at = 0 AND t.status = ?
+		)
+		SELECT t.id, t.code
+		FROM filtered_ticket ft
+		JOIN ticket t ON t.id = ft.id
+		ORDER BY t.id
+	`
+
+	res, err := NewQuery(query, Cursor).
+		WithCTETarget("filtered_ticket", CTEOptions{
+			ColumnMap: map[string]string{"t.id": "id"},
+		}).
+		WithOrderBy("-t.id").
+		WithLimit(10).
+		WithCursor(cursor).
+		WithArgs("active").
+		Build()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	q := strings.ToLower(res.Query)
+
+	cteClose := strings.Index(q, ") select")
+	if cteClose == -1 {
+		t.Fatalf("could not find CTE closing in query: %s", q)
+	}
+	cteBody := q[:cteClose]
+	mainBody := q[cteClose:]
+
+	// CTE body must use the mapped column "id" for both WHERE and ORDER BY...
+	if !strings.Contains(cteBody, "id < ?") {
+		t.Errorf("expected mapped cursor WHERE (id < ?) inside CTE body, got: %s", cteBody)
+	}
+	if !strings.Contains(cteBody, "order by id desc") {
+		t.Errorf("expected mapped ORDER BY (id DESC) inside CTE body, got: %s", cteBody)
+	}
+	// ...and the injected clauses must NOT use the qualified main column.
+	// (The CTE's own "SELECT t.id FROM ticket t" comes from the template and is
+	// expected to remain; we only assert the injected WHERE/ORDER BY are remapped.)
+	if strings.Contains(cteBody, "t.id <") || strings.Contains(cteBody, "order by t.id") {
+		t.Errorf("did not expect injected clauses to use t.id inside CTE body, got: %s", cteBody)
+	}
+
+	// Main query must keep the original qualified column.
+	if !strings.Contains(mainBody, "order by t.id desc") {
+		t.Errorf("expected original ORDER BY (t.id DESC) in main query, got: %s", mainBody)
+	}
+
+	// args unchanged by the remap: "active" (user WHERE), cursor "100", limit+1=11
+	expected := []any{"active", "100", 11}
+	if len(res.Args) != len(expected) {
+		t.Fatalf("expected %d args, got %d: %v", len(expected), len(res.Args), res.Args)
+	}
+	for i, v := range expected {
+		if v != res.Args[i] {
+			t.Errorf("arg[%d]: expected %v, got %v", i, v, res.Args[i])
+		}
+	}
+}
+
+// TestCTEColumnMapOffset verifies the column remap also applies to the CTE-body
+// ORDER BY under offset pagination, leaving the main query column intact.
+func TestCTEColumnMapOffset(t *testing.T) {
+	query := `
+		WITH filtered_ticket AS (
+			SELECT t.id FROM ticket t
+			WHERE t.deleted_at = 0
+		)
+		SELECT t.id, t.code
+		FROM filtered_ticket ft
+		JOIN ticket t ON t.id = ft.id
+		ORDER BY t.id
+	`
+
+	res, err := NewQuery(query, Offset).
+		WithCTETarget("filtered_ticket", CTEOptions{
+			ColumnMap: map[string]string{"t.id": "id"},
+		}).
+		WithOrderBy("-t.id").
+		WithLimit(10).
+		WithOffset(20).
+		Build()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	q := strings.ToLower(res.Query)
+
+	cteClose := strings.Index(q, ") select")
+	if cteClose == -1 {
+		t.Fatalf("could not find CTE closing in query: %s", q)
+	}
+	cteBody := q[:cteClose]
+	mainBody := q[cteClose:]
+
+	if !strings.Contains(cteBody, "order by id desc") {
+		t.Errorf("expected mapped ORDER BY (id DESC) inside CTE body, got: %s", cteBody)
+	}
+	if strings.Contains(cteBody, "order by t.id") {
+		t.Errorf("did not expect injected ORDER BY to use t.id inside CTE body, got: %s", cteBody)
+	}
+	if !strings.Contains(mainBody, "order by t.id desc") {
+		t.Errorf("expected original ORDER BY (t.id DESC) in main query, got: %s", mainBody)
+	}
+}
+
+// TestCTEColumnMapNilUnchanged verifies a nil ColumnMap leaves output identical
+// to the equivalent call without any CTEOptions.
+func TestCTEColumnMapNilUnchanged(t *testing.T) {
+	cursor := base64Encode(`{"prefix":"next","cols":{"id":"100"}}`)
+	query := `
+		WITH filtered_ticket AS (
+			SELECT t.id FROM ticket t
+			WHERE t.deleted_at = 0 AND t.status = ?
+		)
+		SELECT t.id, t.code
+		FROM filtered_ticket ft
+		JOIN ticket t ON t.id = ft.id
+		ORDER BY t.id
+	`
+
+	build := func(opts ...CTEOptions) *Result {
+		res, err := NewQuery(query, Cursor).
+			WithCTETarget("filtered_ticket", opts...).
+			WithOrderBy("-t.id").
+			WithLimit(10).
+			WithCursor(cursor).
+			WithArgs("active").
+			Build()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		return res
+	}
+
+	bare := build()
+	nilMap := build(CTEOptions{ColumnMap: nil})
+
+	if bare.Query != nilMap.Query {
+		t.Errorf("nil ColumnMap changed query:\n bare:   %s\n nilMap: %s", bare.Query, nilMap.Query)
+	}
+}
+
+// TestCTEUnionDerivedTableCursor proves a single filtered_ticket CTE whose body
+// is "SELECT id FROM ( <UNION> ) x" gets the cursor WHERE, ORDER BY, and LIMIT
+// injected onto the OUTER select (column "id" via ColumnMap), while the union's
+// inner per-branch WHEREs are left untouched and the main query keeps "t.id".
+func TestCTEUnionDerivedTableCursor(t *testing.T) {
+	cursor := base64Encode(`{"prefix":"next","cols":{"id":"100"}}`)
+
+	query := `
+		WITH filtered_ticket AS (
+			SELECT id FROM (
+				SELECT t.id FROM ticket t WHERE t.deleted_at = 0 AND t.created_by = ?
+				UNION DISTINCT
+				SELECT t.id FROM ticket t WHERE t.deleted_at = 0 AND t.tracer_id = ?
+				UNION DISTINCT
+				SELECT t.id FROM ticket_assignee ta JOIN ticket t ON t.id = ta.ticket_id AND t.deleted_at = 0 WHERE ta.deleted_at = 0 AND ta.account_id = ?
+			) x
+		)
+		SELECT t.id, t.code
+		FROM filtered_ticket ft
+		JOIN ticket t ON t.id = ft.id
+		ORDER BY t.id
+	`
+
+	res, err := NewQuery(query, Cursor).
+		WithCTETarget("filtered_ticket", CTEOptions{
+			ColumnMap: map[string]string{"t.id": "id"},
+		}).
+		WithOrderBy("-t.id").
+		WithLimit(10).
+		WithCursor(cursor).
+		WithArgs("ACC1", "ACC1", "ACC1").
+		Build()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	q := strings.ToLower(res.Query)
+	t.Logf("built query: %s", q)
+
+	cteClose := strings.LastIndex(q, ") select")
+	if cteClose == -1 {
+		t.Fatalf("could not find CTE closing in query: %s", q)
+	}
+	cteBody := q[:cteClose]
+	mainBody := q[cteClose:]
+
+	// Outer select of the CTE must carry the injected clauses on column "id".
+	if !strings.Contains(cteBody, "id < ?") {
+		t.Errorf("expected injected cursor WHERE (id < ?) on the CTE outer select, got: %s", cteBody)
+	}
+	if !strings.Contains(cteBody, "order by id desc") {
+		t.Errorf("expected injected ORDER BY (id DESC) on the CTE outer select, got: %s", cteBody)
+	}
+	if !strings.Contains(cteBody, "limit ?") {
+		t.Errorf("expected injected LIMIT on the CTE outer select, got: %s", cteBody)
+	}
+	// The union's inner branch WHEREs must be untouched (all three still present).
+	for _, frag := range []string{"t.created_by = ?", "t.tracer_id = ?", "ta.account_id = ?"} {
+		if !strings.Contains(cteBody, frag) {
+			t.Errorf("expected union branch %q to be preserved, got: %s", frag, cteBody)
+		}
+	}
+	// Injected clauses must NOT use the qualified t.id (only the union branches may mention t.*).
+	if strings.Contains(cteBody, "t.id < ?") || strings.Contains(cteBody, "order by t.id") {
+		t.Errorf("injected clauses must use bare id, not t.id, got: %s", cteBody)
+	}
+	// Main query keeps the original qualified column.
+	if !strings.Contains(mainBody, "order by t.id desc") {
+		t.Errorf("expected main ORDER BY t.id DESC, got: %s", mainBody)
+	}
+
+	// args: 3 union account args (earliest in string), cursor "100", limit+1=11
+	expected := []any{"ACC1", "ACC1", "ACC1", "100", 11}
+	if len(res.Args) != len(expected) {
+		t.Fatalf("expected %d args, got %d: %v", len(expected), len(res.Args), res.Args)
+	}
+	for i, v := range expected {
+		if v != res.Args[i] {
+			t.Errorf("arg[%d]: expected %v, got %v", i, v, res.Args[i])
+		}
+	}
+}
+
+// TestCTETargetUnionOwned verifies that targeting a CTE whose body is a raw
+// top-level UNION (the "owned" CTE) auto-wraps the union in a derived table and
+// injects the cursor WHERE, ORDER BY, and LIMIT onto the wrapper using the
+// mapped column ("id"), leaving every union branch intact.
+func TestCTETargetUnionOwned(t *testing.T) {
+	cursor := base64Encode(`{"prefix":"next","cols":{"id":"100"}}`)
+
+	query := `
+		WITH owned AS (
+			SELECT t.id AS id FROM ticket t WHERE t.deleted_at = 0 AND t.created_by = ?
+			UNION DISTINCT
+			SELECT t.id FROM ticket t WHERE t.deleted_at = 0 AND t.tracer_id = ?
+			UNION DISTINCT
+			SELECT ta.ticket_id FROM ticket_assignee ta WHERE ta.deleted_at = 0 AND ta.account_id = ?
+		),
+		filtered_ticket AS (
+			SELECT t.id FROM ticket t INNER JOIN owned o ON t.id = o.id WHERE t.deleted_at = 0
+		)
+		SELECT t.id, t.code
+		FROM filtered_ticket ft
+		JOIN ticket t ON t.id = ft.id
+		ORDER BY t.id
+	`
+
+	res, err := NewQuery(query, Cursor).
+		WithCTETarget("owned", CTEOptions{
+			ColumnMap: map[string]string{"t.id": "id"},
+		}).
+		WithOrderBy("-t.id").
+		WithLimit(10).
+		WithCursor(cursor).
+		WithArgs("ACC1", "ACC1", "ACC1").
+		Build()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	q := strings.ToLower(res.Query)
+	t.Logf("built query: %s", q)
+
+	// The union must have been wrapped in a derived table.
+	if !strings.Contains(q, "kuysor_cte_union") {
+		t.Errorf("expected union CTE body to be wrapped in a derived table, got: %s", q)
+	}
+
+	// Isolate the owned CTE body (from "owned as (" up to ", filtered_ticket as").
+	ownedStart := strings.Index(q, "owned as (")
+	ftStart := strings.Index(q, "filtered_ticket as (")
+	if ownedStart == -1 || ftStart == -1 || ftStart <= ownedStart {
+		t.Fatalf("could not isolate owned CTE body: %s", q)
+	}
+	owned := q[ownedStart:ftStart]
+
+	// Injected clauses on the wrapper, using the mapped column "id".
+	if !strings.Contains(owned, "id < ?") {
+		t.Errorf("expected cursor WHERE (id < ?) on the union wrapper, got: %s", owned)
+	}
+	if !strings.Contains(owned, "order by id desc") {
+		t.Errorf("expected ORDER BY (id DESC) on the union wrapper, got: %s", owned)
+	}
+	if !strings.Contains(owned, "limit ?") {
+		t.Errorf("expected LIMIT on the union wrapper, got: %s", owned)
+	}
+	// All three union branches preserved.
+	for _, frag := range []string{"t.created_by = ?", "t.tracer_id = ?", "ta.account_id = ?"} {
+		if !strings.Contains(owned, frag) {
+			t.Errorf("expected union branch %q preserved, got: %s", frag, owned)
+		}
+	}
+	// Injected clauses must not use the qualified t.id.
+	if strings.Contains(owned, "t.id < ?") || strings.Contains(owned, "order by t.id") {
+		t.Errorf("injected clauses must use bare id, not t.id, got: %s", owned)
+	}
+
+	// args: 3 union account args, cursor "100", limit+1=11
+	expected := []any{"ACC1", "ACC1", "ACC1", "100", 11}
+	if len(res.Args) != len(expected) {
+		t.Fatalf("expected %d args, got %d: %v", len(expected), len(res.Args), res.Args)
+	}
+	for i, v := range expected {
+		if v != res.Args[i] {
+			t.Errorf("arg[%d]: expected %v, got %v", i, v, res.Args[i])
+		}
+	}
+}
+
+// TestCTEDualTargetOwnedAndFiltered verifies that a secondary CTE target (owned,
+// a UNION) is capped IN ADDITION TO the primary CTE target (filtered_ticket):
+// both bodies receive the cursor WHERE + ORDER BY + LIMIT, owned using the mapped
+// "id" column on its wrapped union and filtered_ticket using t.id as today, with
+// args ordered by query-string position (union args, owned cursor+limit, then
+// filtered cursor+limit).
+func TestCTEDualTargetOwnedAndFiltered(t *testing.T) {
+	cursor := base64Encode(`{"prefix":"next","cols":{"id":"100"}}`)
+
+	query := `
+		WITH owned AS (
+			SELECT t.id AS id FROM ticket t WHERE t.deleted_at = 0 AND t.created_by = ?
+			UNION DISTINCT
+			SELECT t.id FROM ticket t WHERE t.deleted_at = 0 AND t.tracer_id = ?
+			UNION DISTINCT
+			SELECT ta.ticket_id FROM ticket_assignee ta WHERE ta.deleted_at = 0 AND ta.account_id = ?
+		),
+		filtered_ticket AS (
+			SELECT t.id FROM ticket t INNER JOIN owned o ON t.id = o.id WHERE t.deleted_at = 0
+		)
+		SELECT t.id, t.code
+		FROM filtered_ticket ft
+		JOIN ticket t ON t.id = ft.id
+		ORDER BY t.id
+	`
+
+	res, err := NewQuery(query, Cursor).
+		WithCTETarget("filtered_ticket").
+		WithCTESecondaryTarget("owned", CTEOptions{ColumnMap: map[string]string{"t.id": "id"}}).
+		WithOrderBy("-t.id").
+		WithLimit(10).
+		WithCursor(cursor).
+		WithArgs("ACC1", "ACC1", "ACC1").
+		Build()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	q := strings.ToLower(res.Query)
+	t.Logf("built query: %s", q)
+
+	ownedStart := strings.Index(q, "owned as (")
+	ftStart := strings.Index(q, "filtered_ticket as (")
+	mainStart := strings.LastIndex(q, ") select")
+	if ownedStart == -1 || ftStart == -1 || mainStart == -1 || !(ownedStart < ftStart && ftStart < mainStart) {
+		t.Fatalf("could not isolate CTE bodies: %s", q)
+	}
+	owned := q[ownedStart:ftStart]
+	filtered := q[ftStart:mainStart]
+	main := q[mainStart:]
+
+	// owned: union wrapped, injected clauses on mapped column "id"
+	if !strings.Contains(owned, "kuysor_cte_union") {
+		t.Errorf("expected owned union to be wrapped, got: %s", owned)
+	}
+	if !strings.Contains(owned, "id < ?") || !strings.Contains(owned, "order by id desc") || !strings.Contains(owned, "limit ?") {
+		t.Errorf("expected owned to get id-based cursor WHERE + ORDER BY + LIMIT, got: %s", owned)
+	}
+	if strings.Contains(owned, "t.id < ?") || strings.Contains(owned, "order by t.id") {
+		t.Errorf("owned injected clauses must use bare id, got: %s", owned)
+	}
+
+	// filtered_ticket: unchanged behavior, on t.id
+	if !strings.Contains(filtered, "t.id < ?") || !strings.Contains(filtered, "order by t.id desc") || !strings.Contains(filtered, "limit ?") {
+		t.Errorf("expected filtered_ticket to keep t.id cursor WHERE + ORDER BY + LIMIT, got: %s", filtered)
+	}
+
+	// main keeps mirrored t.id order
+	if !strings.Contains(main, "order by t.id desc") {
+		t.Errorf("expected main ORDER BY t.id DESC, got: %s", main)
+	}
+
+	// args: union(ACC×3), owned cursor 100 + limit 11, filtered cursor 100 + limit 11
+	expected := []any{"ACC1", "ACC1", "ACC1", "100", 11, "100", 11}
+	if len(res.Args) != len(expected) {
+		t.Fatalf("expected %d args, got %d: %v", len(expected), len(res.Args), res.Args)
+	}
+	for i, v := range expected {
+		if v != res.Args[i] {
+			t.Errorf("arg[%d]: expected %v, got %v", i, v, res.Args[i])
+		}
 	}
 }
